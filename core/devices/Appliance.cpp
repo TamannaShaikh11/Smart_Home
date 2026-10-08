@@ -1,68 +1,127 @@
 #include "Appliance.h"
+
 #include <iostream>
+#include <utility>
 
 Appliance::Appliance(
-    const std::string& id,
-    const std::string& name,
-    const std::string& room,
+    std::string deviceId,
+    std::string deviceName,
+    std::string deviceRoom,
     int powerWatts
-) {
-    this->id = id;
-    this->name = name;
-    this->room = room;
-
+)
+    : id(std::move(deviceId)),
+      name(std::move(deviceName)),
+      room(std::move(deviceRoom)),
+      lifetime(DeviceLifetime::PERMANENT),
+      expiryTime(0)
+{
     state.status = DeviceStatus::OFF;
     state.powerWatts = powerWatts;
     state.setting = 0;
     state.runtimeMinutes = 0;
 }
 
-Appliance::~Appliance() {}
+Appliance::~Appliance()
+{
+}
 
-void Appliance::turnOn() {
+void Appliance::turnOn()
+{
     state.status = DeviceStatus::ON;
 }
 
-void Appliance::turnOff() {
+void Appliance::turnOff()
+{
     state.status = DeviceStatus::OFF;
 }
 
-void Appliance::showStatus() const {
-    std::cout << "\nDevice ID: " << id;
-    std::cout << "\nName: " << name;
-    std::cout << "\nRoom: " << room;
+void Appliance::showStatus() const
+{
+    std::cout << "Device ID: " << id << '\n';
+    std::cout << "Name: " << name << '\n';
+    std::cout << "Room: " << room << '\n';
 
-    std::cout << "\nStatus: ";
+    std::cout << "Status: "
+              << (state.status == DeviceStatus::ON ? "ON" : "OFF")
+              << '\n';
 
-    if (state.status == DeviceStatus::ON)
-        std::cout << "ON";
-    else
-        std::cout << "OFF";
+    std::cout << "Power: " << state.powerWatts << " W\n";
+    std::cout << "Runtime: " << state.runtimeMinutes << " minutes\n";
 
-    std::cout << "\nPower: " << state.powerWatts << " W";
-    std::cout << "\nRuntime: " << state.runtimeMinutes << " minutes\n";
+    std::cout << "Lifetime: "
+              << (lifetime == DeviceLifetime::PERMANENT
+                      ? "PERMANENT"
+                      : "TEMPORARY")
+              << '\n';
+
+    if (lifetime == DeviceLifetime::TEMPORARY && expiryTime != 0)
+    {
+        std::time_t remaining = expiryTime - std::time(nullptr);
+
+        if (remaining < 0)
+            remaining = 0;
+
+        std::cout << "Time remaining: "
+                  << remaining << " seconds\n";
+    }
 }
 
-const std::string& Appliance::getId() const {
+std::string Appliance::getId() const
+{
     return id;
 }
 
-const std::string& Appliance::getName() const {
+std::string Appliance::getName() const
+{
     return name;
 }
 
-const std::string& Appliance::getRoom() const {
+std::string Appliance::getRoom() const
+{
     return room;
 }
 
-DeviceStatus Appliance::getStatus() const {
+DeviceStatus Appliance::getStatus() const
+{
     return state.status;
 }
 
-int Appliance::getPowerWatts() const {
+int Appliance::getPowerWatts() const
+{
     return state.powerWatts;
 }
 
-DeviceState Appliance::getState() const {
+int Appliance::getRuntimeMinutes() const
+{
+    return state.runtimeMinutes;
+}
+
+const DeviceState& Appliance::getState() const
+{
     return state;
 }
+
+void Appliance::setRoom(const std::string& newRoom)
+{
+    room = newRoom;
+}
+
+void Appliance::setLifetime(
+    DeviceLifetime deviceLifetime,
+    std::time_t expiry
+)
+{
+    lifetime = deviceLifetime;
+    expiryTime = expiry;
+}
+
+DeviceLifetime Appliance::getLifetime() const
+{
+    return lifetime;
+}
+
+std::time_t Appliance::getExpiryTime() const
+{
+    return expiryTime;
+}
+

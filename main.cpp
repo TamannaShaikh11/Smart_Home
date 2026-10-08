@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 #include <limits>
+#include <memory>
 #include <exception>
 
 #include "core/home/SmartHome.h"
@@ -19,146 +20,185 @@ void clearInput()
 string readLine(const string& prompt)
 {
     string value;
-
     cout << prompt;
     getline(cin, value);
-
     return value;
+}
+
+unique_ptr<Appliance> createDevice(
+    int type,
+    const string& id,
+    const string& name,
+    const string& room
+)
+{
+    switch (type)
+    {
+        case 1:
+            return make_unique<Light>(id, name, room);
+        case 2:
+            return make_unique<Fan>(id, name, room);
+        case 3:
+            return make_unique<AC>(id, name, room);
+        case 4:
+            return make_unique<Heater>(id, name, room);
+        default:
+            return nullptr;
+    }
 }
 
 void seedHome(SmartHome& home)
 {
-    // Create five rooms.
     home.addRoom("Living Room");
     home.addRoom("Bedroom");
     home.addRoom("Kitchen");
     home.addRoom("Study Room");
     home.addRoom("Bathroom");
 
-    // LIVING ROOM: 5 devices
+    // Living Room: 5
     home.addDevice(new Light(
-        "LIVING_MAIN_LIGHT",
-        "Main Light",
-        "Living Room"
-    ));
-
+        "LIVING_MAIN_LIGHT", "Main Light", "Living Room"));
     home.addDevice(new Light(
-        "LIVING_AMBIENT_LIGHT",
-        "Ambient Light",
-        "Living Room"
-    ));
-
+        "LIVING_AMBIENT_LIGHT", "Ambient Light", "Living Room"));
     home.addDevice(new Fan(
-        "LIVING_FAN",
-        "Ceiling Fan",
-        "Living Room"
-    ));
-
+        "LIVING_FAN", "Ceiling Fan", "Living Room"));
     home.addDevice(new AC(
-        "LIVING_AC",
-        "Living Room AC",
-        "Living Room"
-    ));
-
+        "LIVING_AC", "Living Room AC", "Living Room"));
     home.addDevice(new Heater(
-        "LIVING_HEATER",
-        "Portable Heater",
-        "Living Room"
-    ));
+        "LIVING_HEATER", "Portable Heater", "Living Room"));
 
-    // BEDROOM: 5 devices
+    // Bedroom: 5
     home.addDevice(new Light(
-        "BEDROOM_MAIN_LIGHT",
-        "Bedroom Ceiling Light",
-        "Bedroom"
-    ));
-
+        "BEDROOM_MAIN_LIGHT", "Bedroom Ceiling Light", "Bedroom"));
     home.addDevice(new Light(
-        "BEDROOM_BEDSIDE_LIGHT",
-        "Bedside Light",
-        "Bedroom"
-    ));
-
+        "BEDROOM_BEDSIDE_LIGHT", "Bedside Light", "Bedroom"));
     home.addDevice(new Fan(
-        "BEDROOM_FAN",
-        "Bedroom Fan",
-        "Bedroom"
-    ));
-
+        "BEDROOM_FAN", "Bedroom Fan", "Bedroom"));
     home.addDevice(new AC(
-        "BEDROOM_AC",
-        "Bedroom AC",
-        "Bedroom"
-    ));
-
+        "BEDROOM_AC", "Bedroom AC", "Bedroom"));
     home.addDevice(new Heater(
-        "BEDROOM_HEATER",
-        "Bedroom Heater",
-        "Bedroom"
-    ));
+        "BEDROOM_HEATER", "Bedroom Heater", "Bedroom"));
 
-    // KITCHEN: 3 devices
+    // Kitchen: 3
     home.addDevice(new Light(
-        "KITCHEN_MAIN_LIGHT",
-        "Kitchen Main Light",
-        "Kitchen"
-    ));
-
+        "KITCHEN_MAIN_LIGHT", "Kitchen Main Light", "Kitchen"));
     home.addDevice(new Light(
-        "KITCHEN_COUNTER_LIGHT",
-        "Counter Light",
-        "Kitchen"
-    ));
-
+        "KITCHEN_COUNTER_LIGHT", "Counter Light", "Kitchen"));
     home.addDevice(new Fan(
-        "KITCHEN_EXHAUST_FAN",
-        "Kitchen Exhaust Fan",
-        "Kitchen"
-    ));
+        "KITCHEN_EXHAUST_FAN", "Kitchen Exhaust Fan", "Kitchen"));
 
-    // STUDY ROOM: 4 devices
+    // Study Room: 4
     home.addDevice(new Light(
-        "STUDY_MAIN_LIGHT",
-        "Study Ceiling Light",
-        "Study Room"
-    ));
-
+        "STUDY_MAIN_LIGHT", "Study Ceiling Light", "Study Room"));
     home.addDevice(new Light(
-        "STUDY_DESK_LIGHT",
-        "Study Desk Lamp",
-        "Study Room"
-    ));
-
+        "STUDY_DESK_LIGHT", "Study Desk Lamp", "Study Room"));
     home.addDevice(new Fan(
-        "STUDY_FAN",
-        "Study Room Fan",
-        "Study Room"
-    ));
-
+        "STUDY_FAN", "Study Room Fan", "Study Room"));
     home.addDevice(new AC(
-        "STUDY_AC",
-        "Study Room AC",
-        "Study Room"
-    ));
+        "STUDY_AC", "Study Room AC", "Study Room"));
 
-    // BATHROOM: 3 devices
+    // Bathroom: 3
     home.addDevice(new Light(
-        "BATHROOM_MAIN_LIGHT",
-        "Bathroom Light",
-        "Bathroom"
-    ));
-
+        "BATHROOM_MAIN_LIGHT", "Bathroom Light", "Bathroom"));
     home.addDevice(new Fan(
-        "BATHROOM_VENTILATION",
-        "Ventilation Fan",
-        "Bathroom"
-    ));
-
+        "BATHROOM_VENTILATION", "Ventilation Fan", "Bathroom"));
     home.addDevice(new Heater(
-        "BATHROOM_HEATER",
-        "Water Heater",
-        "Bathroom"
-    ));
+        "BATHROOM_HEATER", "Water Heater", "Bathroom"));
+}
+
+void addDeviceFromMenu(SmartHome& home, bool temporary)
+{
+    cout << "\nDevice types:\n";
+    cout << "1. Light\n";
+    cout << "2. Fan\n";
+    cout << "3. Air Conditioner\n";
+    cout << "4. Heater\n";
+    cout << "Choice: ";
+
+    int type;
+
+    if (!(cin >> type))
+    {
+        cin.clear();
+        clearInput();
+        cout << "Invalid input.\n";
+        return;
+    }
+
+    clearInput();
+
+    if (type < 1 || type > 4)
+    {
+        cout << "Invalid device type.\n";
+        return;
+    }
+
+    string id = readLine("Unique device ID: ");
+    string name = readLine("Device name: ");
+    string room = readLine("Room name: ");
+
+    if (id.empty() || name.empty() || room.empty())
+    {
+        cout << "ID, name, and room are required.\n";
+        return;
+    }
+
+    unique_ptr<Appliance> device =
+        createDevice(type, id, name, room);
+
+    if (!device)
+    {
+        cout << "Could not create device.\n";
+        return;
+    }
+
+    int seconds = 0;
+
+    if (temporary)
+    {
+        cout << "Expiry duration in seconds "
+             << "(0 = manual removal only): ";
+
+        if (!(cin >> seconds))
+        {
+            cin.clear();
+            clearInput();
+            cout << "Invalid duration.\n";
+            return;
+        }
+
+        clearInput();
+
+        if (seconds < 0)
+        {
+            cout << "Duration cannot be negative.\n";
+            return;
+        }
+    }
+
+    try
+    {
+        if (temporary)
+        {
+            home.addTemporaryDevice(device.get(), seconds);
+        }
+        else
+        {
+            home.addDevice(device.get());
+        }
+
+        // Ownership transfers only after registration succeeds.
+        device.release();
+
+        cout << (temporary
+                     ? "Temporary device added.\n"
+                     : "Permanent device added.\n");
+    }
+    catch (const exception& error)
+    {
+        cout << "Could not add device: "
+             << error.what() << '\n';
+    }
 }
 
 void showMenu()
@@ -169,8 +209,11 @@ void showMenu()
     cout << "3. View one room\n";
     cout << "4. Turn ON a device\n";
     cout << "5. Turn OFF a device\n";
-    cout << "6. Exit\n";
-    cout << "Enter choice: ";
+    cout << "6. Add permanent device\n";
+    cout << "7. Add temporary device\n";
+    cout << "8. Remove device manually\n";
+    cout << "9. Exit\n";
+    cout << "Choice: ";
 }
 
 int main()
@@ -178,13 +221,11 @@ int main()
     try
     {
         SmartHome home("My Smart Home");
-
         seedHome(home);
 
         cout << "\nWelcome to OOPS CP!\n";
-        cout << "Home: " << home.getHomeName() << '\n';
-        cout << "Rooms registered: " << home.getRoomCount() << '\n';
-        cout << "Devices registered: " << home.getDeviceCount() << '\n';
+        cout << "Rooms: " << home.getRoomCount() << '\n';
+        cout << "Devices: " << home.getDeviceCount() << '\n';
 
         int choice = 0;
 
@@ -196,8 +237,7 @@ int main()
             {
                 cin.clear();
                 clearInput();
-
-                cout << "Please enter a valid number.\n";
+                cout << "Enter a valid number.\n";
                 continue;
             }
 
@@ -216,43 +256,53 @@ int main()
                         break;
 
                     case 3:
-                    {
-                        string roomName = readLine(
-                            "Enter room name: "
-                        );
-
-                        home.showRoomDevices(roomName);
+                        home.showRoomDevices(
+                            readLine("Room name: "));
                         break;
-                    }
 
                     case 4:
-                    {
-                        string id = readLine(
-                            "Enter device ID to turn ON: "
-                        );
-
-                        home.turnOn(id);
+                        home.turnOn(
+                            readLine("Device ID to turn ON: "));
                         cout << "Device turned ON.\n";
                         break;
-                    }
 
                     case 5:
+                        home.turnOff(
+                            readLine("Device ID to turn OFF: "));
+                        cout << "Device turned OFF.\n";
+                        break;
+
+                    case 6:
+                        addDeviceFromMenu(home, false);
+                        break;
+
+                    case 7:
+                        addDeviceFromMenu(home, true);
+                        break;
+
+                    case 8:
                     {
                         string id = readLine(
-                            "Enter device ID to turn OFF: "
-                        );
+                            "Device ID to remove: ");
 
-                        home.turnOff(id);
-                        cout << "Device turned OFF.\n";
+                        if (home.removeDevice(id))
+                        {
+                            cout << "Device removed successfully.\n";
+                        }
+                        else
+                        {
+                            cout << "Device not found.\n";
+                        }
+
                         break;
                     }
 
-                    case 6:
-                        cout << "Exiting OOPS CP...\n";
+                    case 9:
+                        cout << "Shutting down OOPS CP...\n";
                         break;
 
                     default:
-                        cout << "Invalid choice. Try again.\n";
+                        cout << "Invalid choice.\n";
                 }
             }
             catch (const exception& error)
@@ -261,13 +311,11 @@ int main()
                      << error.what() << '\n';
             }
 
-        } while (choice != 6);
+        } while (choice != 9);
     }
     catch (const exception& error)
     {
-        cerr << "Could not initialize the smart home: "
-             << error.what() << '\n';
-
+        cerr << "Startup failed: " << error.what() << '\n';
         return 1;
     }
 

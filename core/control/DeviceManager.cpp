@@ -1,69 +1,395 @@
 #include "DeviceManager.h"
+
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <chrono>
+#include <utility>
 
-DeviceManager::~DeviceManager() {
-    for (Appliance* device : devices) {
+DeviceManager::DeviceManager()
+    : stopping(false)
+{
+    expiryThread = std::thread(
+        &DeviceManager::expiryWorker,
+        this
+    );
+}
+
+DeviceManager::~DeviceManager()
+{
+    stopExpiryWorker();
+
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    for (Appliance* device : devices)
+    {
         delete device;
     }
 
     devices.clear();
 }
 
-void DeviceManager::addDevice(Appliance* device) {
-    if (device == nullptr) {
+void DeviceManager::stopExpiryWorker()
+{
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+        stopping = true;
+    }
+
+    expiryCondition.notify_all();
+
+    if (expiryThread.joinable())
+    {
+        expiryThread.join();
+    }
+}
+
+void DeviceManager::registerDevice(
+    Appliance* device,
+    DeviceLifetime lifetime,
+    std::time_t expiry
+)
+{
+    if (device == nullptr)
+    {
         throw std::invalid_argument(
-            "Cannot add a null device."
+            "Cannot register a null device."
         );
     }
 
-    devices.push_back(device);
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+
+        if (stopping)
+        {
+            throw std::runtime_error(
+                "Device manager is shutting down."
+            );
+        }
+
+        for (Appliance* existing : devices)
+        {
+            if (existing->getId() == device->getId())
+            {
+                throw std::invalid_argument(
+                    "A device with this ID already exists."
+                );
+            }
+        }
+
+        device->setLifetime(lifetime, expiry);
+        devices.push_back(device);
+    }
+
+    expiryCondition.notify_all();
 }
 
-Appliance* DeviceManager::findDevice(const std::string& id) {
-    for (Appliance* device : devices) {
-        if (device->getId() == id) {
-            return device;
+void DeviceManager::addDevice(Appliance* device)
+{
+    registerDevice(
+        device,
+        DeviceLifetime::PERMANENT,
+        0
+    );
+}
+
+void DeviceManager::addTemporaryDevice(
+    Appliance* device,
+    int lifetimeSeconds
+)
+{
+    if (device == nullptr)
+    {
+        throw std::invalid_argument(
+            "Cannot register a null device."
+        );
+    }
+
+    if (lifetimeSeconds < 0)
+    {
+        throw std::invalid_argument(
+            "Device lifetime cannot be negative."
+        );
+    }
+
+    std::time_t expiry = 0;
+
+    if (lifetimeSeconds > 0)
+    {
+        expiry = std::time(nullptr) + lifetimeSeconds;
+    }
+
+    registerDevice(
+        device,
+        DeviceLifetime::TEMPORARY,
+        expiry
+    );
+}
+
+bool DeviceManager::removeDevice(const std::string& id)
+{
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+
+        auto it = std::find_if(
+            devices.begin(),
+            devices.end(),
+            [&id](Appliance* device)
+            {
+                return device->getId() == id;
+            }
+        );
+
+        if (it == devices.end())
+        {
+            return false;
+        }
+
+        delete *it;
+        devices.erase(it);
+    }
+
+    expiryCondition.notify_all();
+    return true;
+}
+
+bool DeviceManager::hasDevice(const std::string& id) const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    for (Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            return true;
         }
     }
 
-    return nullptr;
+    return false;
 }
 
-void DeviceManager::turnOn(const std::string& id) {
-    Appliance* device = findDevice(id);
+void DeviceManager::turnOn(const std::string& id)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
 
-    if (device == nullptr) {
-        throw std::invalid_argument(
-            "Device not found: " + id
-        );
+    for (Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            if (device->getStatus() == DeviceStatus::ON)
+            {
+                std::cout << device->getName()
+                          << " is already ON.\n";
+                return;
+            }
+
+            device->turnOn();
+
+            std::cout << device->getName()
+                      << " turned ON successfully.\n";
+            return;
+        }
     }
 
-    device->turnOn();
+    throw std::invalid_argument("Device not found: " + id);
 }
 
-void DeviceManager::turnOff(const std::string& id) {
-    Appliance* device = findDevice(id);
+void DeviceManager::turnOff(const std::string& id)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
 
-    if (device == nullptr) {
-        throw std::invalid_argument(
-            "Device not found: " + id
-        );
+    for (Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            if (device->getStatus() == DeviceStatus::OFF)
+            {
+                std::cout << device->getName()
+                          << " is already OFF.\n";
+                return;
+            }
+
+            device->turnOff();
+
+            std::cout << device->getName()
+                      << " turned OFF successfully.\n";
+            return;
+        }
     }
 
-    device->turnOff();
+    throw std::invalid_argument("Device not found: " + id);
 }
 
-void DeviceManager::showAllDevices() const {
-    std::cout << "\n================================";
-    std::cout << "\n       SMART HOME DEVICES";
+
+bool DeviceManager::showDeviceStatus(const std::string& id)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    for (Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            device->showStatus();
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void DeviceManager::showAllDevices()
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
     std::cout << "\n================================\n";
+    std::cout << "       SMART HOME DEVICES\n";
+    std::cout << "================================\n";
 
-    for (const Appliance* device : devices) {
+    if (devices.empty())
+    {
+        std::cout << "No devices registered.\n";
+        return;
+    }
+
+    for (Appliance* device : devices)
+    {
+        std::cout << '\n';
         device->showStatus();
+        std::cout << "-------------------------------\n";
     }
 }
 
-int DeviceManager::getDeviceCount() const {
+int DeviceManager::getDeviceCount() const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
     return static_cast<int>(devices.size());
+}
+
+void DeviceManager::setExpiryCallback(
+    std::function<void(const std::string&)> callback
+)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    expiryCallback = std::move(callback);
+}
+
+void DeviceManager::removeExpiredDevices()
+{
+    std::vector<std::string> expiredIds;
+    std::function<void(const std::string&)> callback;
+
+    {
+        std::lock_guard<std::mutex> lock(devicesMutex);
+
+        const std::time_t now = std::time(nullptr);
+
+        auto it = devices.begin();
+
+        while (it != devices.end())
+        {
+            Appliance* device = *it;
+
+            if (device->getLifetime() == DeviceLifetime::TEMPORARY &&
+                device->getExpiryTime() != 0 &&
+                now >= device->getExpiryTime())
+            {
+                expiredIds.push_back(device->getId());
+
+                delete device;
+                it = devices.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        callback = expiryCallback;
+    }
+
+    // Notify SmartHome only after releasing devicesMutex.
+    // This avoids locking the home while holding the device lock.
+    if (callback)
+    {
+        for (const std::string& id : expiredIds)
+        {
+            callback(id);
+        }
+    }
+}
+
+void DeviceManager::expiryWorker()
+{
+    std::unique_lock<std::mutex> lock(devicesMutex);
+
+    while (!stopping)
+    {
+        std::time_t nearestExpiry = 0;
+
+        for (Appliance* device : devices)
+        {
+            if (device->getLifetime() != DeviceLifetime::TEMPORARY)
+            {
+                continue;
+            }
+
+            const std::time_t expiry = device->getExpiryTime();
+
+            // Expiry time zero means manual removal only.
+            if (expiry == 0)
+            {
+                continue;
+            }
+
+            if (nearestExpiry == 0 || expiry < nearestExpiry)
+            {
+                nearestExpiry = expiry;
+            }
+        }
+
+        if (nearestExpiry == 0)
+        {
+            expiryCondition.wait(
+                lock,
+                [this]()
+                {
+                    if (stopping)
+                    {
+                        return true;
+                    }
+
+                    for (Appliance* device : devices)
+                    {
+                        if (device->getLifetime() ==
+                                DeviceLifetime::TEMPORARY &&
+                            device->getExpiryTime() != 0)
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+            );
+
+            continue;
+        }
+
+        const auto deadline =
+            std::chrono::system_clock::from_time_t(nearestExpiry);
+
+        // Any notification causes the worker to recalculate deadlines.
+        expiryCondition.wait_until(lock, deadline);
+
+        if (stopping)
+        {
+            break;
+        }
+
+        lock.unlock();
+        removeExpiredDevices();
+        lock.lock();
+    }
 }

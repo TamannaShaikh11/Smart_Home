@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 SmartHome::SmartHome(const std::string& name)
 {
@@ -13,6 +14,20 @@ SmartHome::SmartHome(const std::string& name)
     }
 
     homeName = name;
+
+    deviceManager.setExpiryCallback(
+        [this](const std::string& deviceId)
+        {
+            handleExpiredDevice(deviceId);
+        }
+    );
+}
+
+SmartHome::~SmartHome()
+{
+    // Ensure no worker callback accesses this object during destruction.
+    deviceManager.stopExpiryWorker();
+    deviceManager.setExpiryCallback({});
 }
 
 Room* SmartHome::findRoom(const std::string& roomName)
@@ -45,7 +60,14 @@ const Room* SmartHome::findRoom(
 
 bool SmartHome::addRoom(const std::string& roomName)
 {
-    if (roomName.empty() || findRoom(roomName) != nullptr)
+    if (roomName.empty())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    if (findRoom(roomName) != nullptr)
     {
         return false;
     }
@@ -63,8 +85,9 @@ void SmartHome::addDevice(Appliance* device)
         );
     }
 
-    // Reject duplicate IDs before transferring ownership.
-    if (deviceManager.findDevice(device->getId()) != nullptr)
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    if (deviceManager.hasDevice(device->getId()))
     {
         throw std::invalid_argument(
             "A device with this ID already exists."
@@ -80,18 +103,98 @@ void SmartHome::addDevice(Appliance* device)
         );
     }
 
-    // Create the room if it doesn't already exist.
-    if (findRoom(roomName) == nullptr)
+    Room* room = findRoom(roomName);
+
+    if (room == nullptr)
     {
-        addRoom(roomName);
+        rooms.emplace_back(roomName);
+        room = &rooms.back();
+    }
+
+    // Ownership transfers only after successful registration.
+    deviceManager.addDevice(device);
+    room->addDeviceId(device->getId());
+}
+
+void SmartHome::addTemporaryDevice(
+    Appliance* device,
+    int lifetimeSeconds
+)
+{
+    if (device == nullptr)
+    {
+        throw std::invalid_argument(
+            "Cannot add a null device."
+        );
+    }
+
+    if (lifetimeSeconds < 0)
+    {
+        throw std::invalid_argument(
+            "Expiry duration cannot be negative."
+        );
+    }
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    if (deviceManager.hasDevice(device->getId()))
+    {
+        throw std::invalid_argument(
+            "A device with this ID already exists."
+        );
+    }
+
+    const std::string roomName = device->getRoom();
+
+    if (roomName.empty())
+    {
+        throw std::invalid_argument(
+            "Device must have a room name."
+        );
     }
 
     Room* room = findRoom(roomName);
 
-    // DeviceManager takes ownership after successful registration.
-    deviceManager.addDevice(device);
+    if (room == nullptr)
+    {
+        rooms.emplace_back(roomName);
+        room = &rooms.back();
+    }
 
+    deviceManager.addTemporaryDevice(device, lifetimeSeconds);
     room->addDeviceId(device->getId());
+}
+
+bool SmartHome::removeDevice(const std::string& deviceId)
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    if (!deviceManager.removeDevice(deviceId))
+    {
+        return false;
+    }
+
+    for (Room& room : rooms)
+    {
+        room.removeDeviceId(deviceId);
+    }
+
+    return true;
+}
+
+void SmartHome::handleExpiredDevice(
+    const std::string& deviceId
+)
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    for (Room& room : rooms)
+    {
+        room.removeDeviceId(deviceId);
+    }
+
+    std::cout << "\n[TIMER] Temporary device expired: "
+              << deviceId << '\n';
 }
 
 void SmartHome::turnOn(const std::string& deviceId)
@@ -104,15 +207,17 @@ void SmartHome::turnOff(const std::string& deviceId)
     deviceManager.turnOff(deviceId);
 }
 
-Appliance* SmartHome::findDevice(const std::string& deviceId)
+bool SmartHome::hasDevice(const std::string& deviceId) const
 {
-    return deviceManager.findDevice(deviceId);
+    return deviceManager.hasDevice(deviceId);
 }
 
 void SmartHome::showRooms()
 {
+    std::lock_guard<std::mutex> lock(homeMutex);
+
     std::cout << "\n====================================\n";
-    std::cout << "             " << homeName << '\n';
+    std::cout << homeName << '\n';
     std::cout << "====================================\n";
 
     for (const Room& room : rooms)
@@ -122,13 +227,9 @@ void SmartHome::showRooms()
 
         for (const std::string& id : room.getDeviceIds())
         {
-            Appliance* device = deviceManager.findDevice(id);
-
-            if (device != nullptr)
+            if (deviceManager.hasDevice(id))
             {
-                std::cout << "  - "
-                          << device->getName()
-                          << " [" << device->getId() << "]\n";
+                std::cout << "  - " << id << '\n';
             }
         }
     }
@@ -136,6 +237,8 @@ void SmartHome::showRooms()
 
 void SmartHome::showRoomDevices(const std::string& roomName)
 {
+    std::lock_guard<std::mutex> lock(homeMutex);
+
     Room* room = findRoom(roomName);
 
     if (room == nullptr)
@@ -146,21 +249,20 @@ void SmartHome::showRoomDevices(const std::string& roomName)
 
     std::cout << "\n--- " << room->getName() << " ---\n";
 
-    if (room->getDeviceCount() == 0)
-    {
-        std::cout << "No devices in this room.\n";
-        return;
-    }
+    bool found = false;
 
     for (const std::string& id : room->getDeviceIds())
     {
-        Appliance* device = deviceManager.findDevice(id);
-
-        if (device != nullptr)
+        if (deviceManager.showDeviceStatus(id))
         {
-            device->showStatus();
+            found = true;
             std::cout << "--------------------------\n";
         }
+    }
+
+    if (!found)
+    {
+        std::cout << "No devices in this room.\n";
     }
 }
 
@@ -171,6 +273,8 @@ void SmartHome::showAllDevices()
 
 int SmartHome::getRoomCount() const
 {
+    std::lock_guard<std::mutex> lock(homeMutex);
+
     return static_cast<int>(rooms.size());
 }
 

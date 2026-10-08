@@ -2,20 +2,27 @@
 #define APPLIANCE_H
 
 #include <string>
-#include "../state/DeviceState.h"
+#include <ctime>
 
-class Appliance {
+#include "../state/DeviceState.h"
+#include "../state/DeviceLifetime.h"
+
+class Appliance
+{
 protected:
     std::string id;
     std::string name;
     std::string room;
     DeviceState state;
 
+    DeviceLifetime lifetime;
+    std::time_t expiryTime;
+
 public:
     Appliance(
-        const std::string& id,
-        const std::string& name,
-        const std::string& room,
+        std::string id,
+        std::string name,
+        std::string room,
         int powerWatts
     );
 
@@ -23,17 +30,27 @@ public:
 
     virtual void turnOn();
     virtual void turnOff();
-
     virtual void showStatus() const;
 
-    const std::string& getId() const;
-    const std::string& getName() const;
-    const std::string& getRoom() const;
+    std::string getId() const;
+    std::string getName() const;
+    std::string getRoom() const;
 
     DeviceStatus getStatus() const;
     int getPowerWatts() const;
+    int getRuntimeMinutes() const;
 
-    DeviceState getState() const;
+    const DeviceState& getState() const;
+
+    void setRoom(const std::string& newRoom);
+
+    void setLifetime(
+        DeviceLifetime deviceLifetime,
+        std::time_t expiry
+    );
+
+    DeviceLifetime getLifetime() const;
+    std::time_t getExpiryTime() const;
 };
 
 #endif

@@ -49,3 +49,7 @@ Thumbs.db
 # Personal editor settings
 # ==============================
 .vscode/
+# Database test files
+database_test.cpp
+smarthome_test.db
+test.cpp

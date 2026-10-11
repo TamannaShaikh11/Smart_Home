@@ -17,7 +17,7 @@ void clearInput()
     cin.ignore(numeric_limits<streamsize>::max(), '\n');
 }
 
-string readLine(const string& prompt)
+string readLine(const string &prompt)
 {
     string value;
     cout << prompt;
@@ -27,27 +27,26 @@ string readLine(const string& prompt)
 
 unique_ptr<Appliance> createDevice(
     int type,
-    const string& id,
-    const string& name,
-    const string& room
-)
+    const string &id,
+    const string &name,
+    const string &room)
 {
     switch (type)
     {
-        case 1:
-            return make_unique<Light>(id, name, room);
-        case 2:
-            return make_unique<Fan>(id, name, room);
-        case 3:
-            return make_unique<AC>(id, name, room);
-        case 4:
-            return make_unique<Heater>(id, name, room);
-        default:
-            return nullptr;
+    case 1:
+        return make_unique<Light>(id, name, room);
+    case 2:
+        return make_unique<Fan>(id, name, room);
+    case 3:
+        return make_unique<AC>(id, name, room);
+    case 4:
+        return make_unique<Heater>(id, name, room);
+    default:
+        return nullptr;
     }
 }
 
-void seedHome(SmartHome& home)
+void seedHome(SmartHome &home)
 {
     home.addRoom("Living Room");
     home.addRoom("Bedroom");
@@ -106,7 +105,36 @@ void seedHome(SmartHome& home)
         "BATHROOM_HEATER", "Water Heater", "Bathroom"));
 }
 
-void addDeviceFromMenu(SmartHome& home, bool temporary)
+void addRoomFromMenu(SmartHome &home)
+{
+    string roomName = readLine("Enter new room name: ");
+
+    if (roomName.empty())
+    {
+        cout << "Room name cannot be empty.\n";
+        return;
+    }
+
+    try
+    {
+        if (home.addRoom(roomName))
+        {
+            cout << "Room added successfully: "
+                 << roomName << '\n';
+        }
+        else
+        {
+            cout << "Room already exists or could not be added.\n";
+        }
+    }
+    catch (const exception &error)
+    {
+        cout << "Could not add room: "
+             << error.what() << '\n';
+    }
+}
+
+void addDeviceFromMenu(SmartHome &home, bool temporary)
 {
     cout << "\nDevice types:\n";
     cout << "1. Light\n";
@@ -194,7 +222,7 @@ void addDeviceFromMenu(SmartHome& home, bool temporary)
                      ? "Temporary device added.\n"
                      : "Permanent device added.\n");
     }
-    catch (const exception& error)
+    catch (const exception &error)
     {
         cout << "Could not add device: "
              << error.what() << '\n';
@@ -209,10 +237,11 @@ void showMenu()
     cout << "3. View one room\n";
     cout << "4. Turn ON a device\n";
     cout << "5. Turn OFF a device\n";
-    cout << "6. Add permanent device\n";
-    cout << "7. Add temporary device\n";
-    cout << "8. Remove device manually\n";
-    cout << "9. Exit\n";
+    cout << "6. Add room\n";
+    cout << "7. Add permanent device\n";
+    cout << "8. Add temporary device\n";
+    cout << "9. Remove device manually\n";
+    cout << "10. Exit\n";
     cout << "Choice: ";
 }
 
@@ -221,7 +250,11 @@ int main()
     try
     {
         SmartHome home("My Smart Home");
-        seedHome(home);
+
+        if (home.getDeviceCount() == 0)
+        {
+            seedHome(home);
+        }
 
         cout << "\nWelcome to OOPS CP!\n";
         cout << "Rooms: " << home.getRoomCount() << '\n';
@@ -245,75 +278,76 @@ int main()
 
             try
             {
+
                 switch (choice)
                 {
-                    case 1:
-                        home.showRooms();
-                        break;
+                case 1:
+                    home.showRooms();
+                    break;
 
-                    case 2:
-                        home.showAllDevices();
-                        break;
+                case 2:
+                    home.showAllDevices();
+                    break;
 
-                    case 3:
-                        home.showRoomDevices(
-                            readLine("Room name: "));
-                        break;
+                case 3:
+                    home.showRoomDevices(readLine("Room name: "));
+                    break;
 
-                    case 4:
-                        home.turnOn(
-                            readLine("Device ID to turn ON: "));
-                        cout << "Device turned ON.\n";
-                        break;
+                case 4:
+                    home.turnOn(readLine("Device ID to turn ON: "));
+                    cout << "Device turned ON.\n";
+                    break;
 
-                    case 5:
-                        home.turnOff(
-                            readLine("Device ID to turn OFF: "));
-                        cout << "Device turned OFF.\n";
-                        break;
+                case 5:
+                    home.turnOff(readLine("Device ID to turn OFF: "));
+                    cout << "Device turned OFF.\n";
+                    break;
 
-                    case 6:
-                        addDeviceFromMenu(home, false);
-                        break;
+                case 6:
+                    addRoomFromMenu(home);
+                    break;
 
-                    case 7:
-                        addDeviceFromMenu(home, true);
-                        break;
+                case 7:
+                    addDeviceFromMenu(home, false);
+                    break;
 
-                    case 8:
+                case 8:
+                    addDeviceFromMenu(home, true);
+                    break;
+
+                case 9:
+                {
+                    string id = readLine("Device ID to remove: ");
+
+                    if (home.removeDevice(id))
                     {
-                        string id = readLine(
-                            "Device ID to remove: ");
-
-                        if (home.removeDevice(id))
-                        {
-                            cout << "Device removed successfully.\n";
-                        }
-                        else
-                        {
-                            cout << "Device not found.\n";
-                        }
-
-                        break;
+                        cout << "Device removed successfully.\n";
+                    }
+                    else
+                    {
+                        cout << "Device not found.\n";
                     }
 
-                    case 9:
-                        cout << "Shutting down OOPS CP...\n";
-                        break;
+                    break;
+                }
 
-                    default:
-                        cout << "Invalid choice.\n";
+                case 10:
+                    cout << "Shutting down OOPS CP...\n";
+                    break;
+
+                default:
+                    cout << "Invalid choice.\n";
                 }
             }
-            catch (const exception& error)
+            catch (const exception &error)
             {
                 cout << "Operation failed: "
                      << error.what() << '\n';
             }
 
-        } while (choice != 9);
+        } while (choice != 10);
     }
-    catch (const exception& error)
+    catch (const exception &error)
     {
         cerr << "Startup failed: " << error.what() << '\n';
         return 1;

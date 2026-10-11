@@ -208,34 +208,55 @@ bool Database::updateDevice(const DeviceRecord& device)
     return changed > 0;
 }
 
+
 bool Database::deleteDevice(const std::string& deviceId)
 {
-    const char* sql = "DELETE FROM devices WHERE id = ?;";
+    const char* sql =
+        "DELETE FROM devices WHERE id = ?;";
+
     sqlite3_stmt* stmt = nullptr;
 
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    if (sqlite3_prepare_v2(
+            db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
         std::cerr << "Prepare delete failed: "
                   << sqlite3_errmsg(db) << '\n';
         return false;
     }
 
-    sqlite3_bind_text(
-        stmt, 1, deviceId.c_str(), -1, SQLITE_TRANSIENT
+    int bindResult = sqlite3_bind_text(
+        stmt,
+        1,
+        deviceId.c_str(),
+        -1,
+        SQLITE_TRANSIENT
     );
 
+    if (bindResult != SQLITE_OK)
+    {
+        std::cerr << "Bind delete parameter failed: "
+                  << sqlite3_errmsg(db) << '\n';
+
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
     int result = sqlite3_step(stmt);
-    int changed = sqlite3_changes(db);
-    sqlite3_finalize(stmt);
 
     if (result != SQLITE_DONE)
     {
         std::cerr << "Delete device failed: "
                   << sqlite3_errmsg(db) << '\n';
+
+        sqlite3_finalize(stmt);
         return false;
     }
 
-    return changed > 0;
+    sqlite3_finalize(stmt);
+
+    // SQLITE_DONE means the DELETE statement succeeded.
+    // Zero matching rows is not an SQL execution failure.
+    return true;
 }
 
 std::vector<std::string> Database::loadRooms()

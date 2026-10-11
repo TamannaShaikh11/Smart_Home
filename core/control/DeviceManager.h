@@ -10,6 +10,7 @@
 #include <functional>
 
 #include "../devices/Appliance.h"
+#include "../storage/Database.h"
 
 class DeviceManager
 {
@@ -26,6 +27,7 @@ private:
 
     void expiryWorker();
     void removeExpiredDevices();
+
     void registerDevice(
         Appliance* device,
         DeviceLifetime lifetime,
@@ -39,17 +41,14 @@ public:
     DeviceManager(const DeviceManager&) = delete;
     DeviceManager& operator=(const DeviceManager&) = delete;
 
-    // DeviceManager owns the pointer after successful registration.
     void addDevice(Appliance* device);
 
-    // A duration of zero means manual removal only.
     void addTemporaryDevice(
         Appliance* device,
         int lifetimeSeconds
     );
 
     bool removeDevice(const std::string& id);
-
     bool hasDevice(const std::string& id) const;
 
     void turnOn(const std::string& id);
@@ -60,12 +59,18 @@ public:
 
     int getDeviceCount() const;
 
+    // Safely copy a device's current state for database persistence.
+    bool getDeviceRecord(
+        const std::string& id,
+        DeviceRecord& record
+    ) const;
+
     void setExpiryCallback(
         std::function<void(const std::string&)> callback
     );
 
-    // Stop and join the worker before the owning SmartHome is destroyed.
     void stopExpiryWorker();
 };
 
 #endif
+

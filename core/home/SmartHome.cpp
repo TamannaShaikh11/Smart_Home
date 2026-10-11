@@ -1,338 +1,546 @@
-
 #include "SmartHome.h"
 
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <memory>
+#include <ctime>
 
-// Constructor
+#include "../devices/Light.h"
+#include "../devices/Fan.h"
+#include "../devices/AC.h"
+#include "../devices/Heater.h"
+
+namespace
+{
+    DeviceRecord makeDeviceRecord(const Appliance& device)
+    {
+        DeviceRecord record;
+
+        record.id = device.getId();
+        record.name = device.getName();
+        record.type = device.getType();
+        record.roomName = device.getRoom();
+        record.status =
+            device.getStatus() == DeviceStatus::ON ? 1 : 0;
+        record.powerWatts = device.getPowerWatts();
+        record.runtimeMinutes = device.getRuntimeMinutes();
+        record.lifetime = static_cast<int>(device.getLifetime());
+        record.expiryTime =
+            static_cast<long long>(device.getExpiryTime());
+
+        record.setting = device.getState().setting;
+
+        return record;
+    }
+
+    std::unique_ptr<Appliance> createRestoredDevice(
+        const DeviceRecord& record)
+    {
+        std::unique_ptr<Appliance> device;
+
+        if (record.type == "Light")
+        {
+            device = std::make_unique<Light>(
+                record.id, record.name, record.roomName,
+                record.powerWatts);
+        }
+        else if (record.type == "Fan")
+        {
+            auto fan = std::make_unique<Fan>(
+                record.id, record.name, record.roomName,
+                record.powerWatts);
+
+            fan->setSpeed(record.setting);
+            device = std::move(fan);
+        }
+        else if (record.type == "AC")
+        {
+            auto ac = std::make_unique<AC>(
+                record.id, record.name, record.roomName,
+                record.powerWatts);
+
+            ac->setTemperature(record.setting);
+            device = std::move(ac);
+        }
+        else if (record.type == "Heater")
+        {
+            auto heater = std::make_unique<Heater>(
+                record.id, record.name, record.roomName,
+                record.powerWatts);
+
+            heater->setTemperature(record.setting);
+            device = std::move(heater);
+        }
+        else
+        {
+            std::cerr << "Skipping unsupported saved device type: "
+                      << record.type << '\n';
+            return nullptr;
+        }
+
+        device->restoreState(
+            record.status == 1 ? DeviceStatus::ON : DeviceStatus::OFF,
+            record.runtimeMinutes);
+
+        return device;
+    }
+}
+
 SmartHome::SmartHome(const std::string& name)
     : homeName(name),
       database("smarthome.db"),
       deviceManager()
 {
-    if (homeName.empty()) {
+    if (homeName.empty())
         throw std::invalid_argument(
-            "Smart home name cannot be empty."
-        );
-    }
+            "Smart home name cannot be empty.");
 
-    if (!database.initializeSchema()) {
-        std::cerr << "Warning: Database schema initialization failed.\n";
-    }
+    if (!database.initializeSchema())
+        throw std::runtime_error(
+            "Could not initialize the SmartHome database.");
+
+    // Restore rooms first, so saved devices have valid rooms.
+    for (const std::string& roomName : database.loadRooms())
+        rooms.emplace_back(roomName);
 
     deviceManager.setExpiryCallback(
-        [this](const std::string& deviceId) {
+        [this](const std::string& deviceId)
+        {
             handleExpiredDevice(deviceId);
-        }
-    );
+        });
 
-    std::cout << "SmartHome created: "
-              << homeName << '\n';
+    // Restore devices from SQLite.
+    const std::time_t now = std::time(nullptr);
+
+    for (const DeviceRecord& record : database.loadDevices())
+    {
+        // Remove temporary devices that expired while the app was closed.
+        if (record.lifetime ==
+                static_cast<int>(DeviceLifetime::TEMPORARY) &&
+            record.expiryTime != 0 &&
+            record.expiryTime <= static_cast<long long>(now))
+        {
+            database.deleteDevice(record.id);
+            continue;
+        }
+
+        std::unique_ptr<Appliance> device =
+            createRestoredDevice(record);
+
+        if (!device)
+        {
+            database.deleteDevice(record.id);
+            continue;
+        }
+
+        try
+        {
+            Room* room = findRoom(record.roomName);
+
+            if (room == nullptr)
+            {
+                rooms.emplace_back(record.roomName);
+                room = &rooms.back();
+                database.saveRoom(record.roomName);
+            }
+
+            room->addDevice(record.id);
+
+            if (record.lifetime ==
+                static_cast<int>(DeviceLifetime::TEMPORARY))
+            {
+                int remainingSeconds = 0;
+
+                if (record.expiryTime > 0)
+                {
+                    remainingSeconds = static_cast<int>(
+                        record.expiryTime -
+                        static_cast<long long>(now));
+                }
+
+                deviceManager.addTemporaryDevice(
+                    device.get(), remainingSeconds);
+            }
+            else
+            {
+                deviceManager.addDevice(device.get());
+            }
+
+            // DeviceManager now owns the object.
+            device.release();
+        }
+        catch (const std::exception& error)
+        {
+            if (Room* room = findRoom(record.roomName))
+                room->removeDevice(record.id);
+
+            std::cerr << "Could not restore device "
+                      << record.id << ": "
+                      << error.what() << '\n';
+        }
+    }
+
+    std::cout << "SmartHome created: " << homeName << '\n';
+    std::cout << "Saved devices restored: "
+              << deviceManager.getDeviceCount() << '\n';
 }
 
-// Destructor
 SmartHome::~SmartHome()
 {
-    // Stop the worker before the rest of SmartHome is destroyed.
     deviceManager.setExpiryCallback(nullptr);
     deviceManager.stopExpiryWorker();
 }
 
-// Find a room
 Room* SmartHome::findRoom(const std::string& roomName)
 {
-    for (auto& room : rooms) {
-        if (room.getName() == roomName) {
+    for (Room& room : rooms)
+    {
+        if (room.getName() == roomName)
             return &room;
-        }
     }
 
     return nullptr;
 }
 
-// Find a room (const version)
 const Room* SmartHome::findRoom(
-    const std::string& roomName
-) const
+    const std::string& roomName) const
 {
-    for (const auto& room : rooms) {
-        if (room.getName() == roomName) {
+    for (const Room& room : rooms)
+    {
+        if (room.getName() == roomName)
             return &room;
-        }
     }
 
     return nullptr;
 }
 
-// Add a room
 bool SmartHome::addRoom(const std::string& roomName)
 {
-    if (roomName.empty()) {
-        std::cout << "Room name cannot be empty.\n";
+    if (roomName.empty())
         return false;
-    }
 
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    if (findRoom(roomName) != nullptr) {
-        std::cout << "Room already exists: "
-                  << roomName << '\n';
+    if (findRoom(roomName) != nullptr)
         return false;
-    }
 
     rooms.emplace_back(roomName);
 
-    if (!database.saveRoom(roomName)) {
-        std::cerr << "Warning: Could not save room to database.\n";
+    if (!database.saveRoom(roomName))
+    {
+        rooms.pop_back();
+        return false;
     }
 
     std::cout << "Room added: " << roomName << '\n';
     return true;
 }
 
-// Add a permanent device
 void SmartHome::addDevice(Appliance* device)
 {
-    if (device == nullptr) {
-        std::cout << "Cannot add a null device.\n";
-        return;
-    }
+    if (device == nullptr)
+        throw std::invalid_argument("Device cannot be null.");
 
     const std::string roomName = device->getRoom();
     const std::string deviceId = device->getId();
 
+    if (roomName.empty() || deviceId.empty())
+    {
+        delete device;
+        throw std::invalid_argument(
+            "Device ID and room name cannot be empty.");
+    }
+
+    bool roomWasCreated = false;
+
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        if (roomName.empty()) {
-            delete device;
-            throw std::invalid_argument(
-                "Device room name cannot be empty."
-            );
-        }
-
-        if (findRoom(roomName) == nullptr) {
+        if (findRoom(roomName) == nullptr)
+        {
             rooms.emplace_back(roomName);
+            roomWasCreated = true;
 
-            if (!database.saveRoom(roomName)) {
-                std::cerr << "Warning: Could not save room.\n";
+            if (!database.saveRoom(roomName))
+            {
+                rooms.pop_back();
+                delete device;
+                throw std::runtime_error(
+                    "Could not save the device's room.");
             }
         }
 
-        Room* room = findRoom(roomName);
-
-        if (room != nullptr) {
-            room->addDevice(deviceId);
-        }
+        findRoom(roomName)->addDevice(deviceId);
     }
 
-    deviceManager.addDevice(device);
+    try
+    {
+        deviceManager.addDevice(device);
+
+        DeviceRecord record = makeDeviceRecord(*device);
+
+        if (!database.saveDevice(record))
+        {
+            deviceManager.removeDevice(deviceId);
+
+            std::lock_guard<std::mutex> lock(homeMutex);
+            if (Room* room = findRoom(roomName))
+                room->removeDevice(deviceId);
+
+            throw std::runtime_error(
+                "Could not save device to the database.");
+        }
+    }
+    catch (...)
+    {
+        {
+            std::lock_guard<std::mutex> lock(homeMutex);
+
+            if (Room* room = findRoom(roomName))
+                room->removeDevice(deviceId);
+
+            if (roomWasCreated)
+            {
+                auto it = std::find_if(
+                    rooms.begin(), rooms.end(),
+                    [&roomName](const Room& room)
+                    {
+                        return room.getName() == roomName;
+                    });
+
+                if (it != rooms.end() &&
+                    it->getDeviceCount() == 0)
+                {
+                    rooms.erase(it);
+                }
+            }
+        }
+
+        // If registration failed, DeviceManager did not take ownership.
+        // If saving failed, the device was already removed by the manager.
+        // Do not delete the pointer here: its ownership depends on the
+        // point at which the exception occurred.
+        throw;
+    }
 
     std::cout << "Permanent device added: "
               << deviceId << '\n';
 }
 
-// Add a temporary device
 void SmartHome::addTemporaryDevice(
-    Appliance* device,
-    int lifetimeSeconds
-)
+    Appliance* device, int lifetimeSeconds)
 {
-    if (device == nullptr) {
-        std::cout << "Cannot add a null device.\n";
-        return;
-    }
+    if (device == nullptr)
+        throw std::invalid_argument("Device cannot be null.");
 
-    if (lifetimeSeconds < 0) {
+    if (lifetimeSeconds < 0)
+    {
         delete device;
         throw std::invalid_argument(
-            "Device lifetime cannot be negative."
-        );
+            "Lifetime cannot be negative.");
     }
 
     const std::string roomName = device->getRoom();
     const std::string deviceId = device->getId();
 
-    if (roomName.empty()) {
+    if (roomName.empty() || deviceId.empty())
+    {
         delete device;
         throw std::invalid_argument(
-            "Device room name cannot be empty."
-        );
+            "Device ID and room name cannot be empty.");
     }
+
+    bool roomWasCreated = false;
 
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        if (findRoom(roomName) == nullptr) {
+        if (findRoom(roomName) == nullptr)
+        {
             rooms.emplace_back(roomName);
+            roomWasCreated = true;
 
-            if (!database.saveRoom(roomName)) {
-                std::cerr << "Warning: Could not save room.\n";
+            if (!database.saveRoom(roomName))
+            {
+                rooms.pop_back();
+                delete device;
+                throw std::runtime_error(
+                    "Could not save the device's room.");
             }
         }
 
-        Room* room = findRoom(roomName);
-
-        if (room != nullptr) {
-            room->addDevice(deviceId);
-        }
+        findRoom(roomName)->addDevice(deviceId);
     }
 
-    deviceManager.addTemporaryDevice(
-        device,
-        lifetimeSeconds
-    );
+    try
+    {
+        deviceManager.addTemporaryDevice(
+            device, lifetimeSeconds);
+
+        DeviceRecord record = makeDeviceRecord(*device);
+
+        if (!database.saveDevice(record))
+        {
+            deviceManager.removeDevice(deviceId);
+
+            std::lock_guard<std::mutex> lock(homeMutex);
+            if (Room* room = findRoom(roomName))
+                room->removeDevice(deviceId);
+
+            throw std::runtime_error(
+                "Could not save temporary device to the database.");
+        }
+    }
+    catch (...)
+    {
+        {
+            std::lock_guard<std::mutex> lock(homeMutex);
+
+            if (Room* room = findRoom(roomName))
+                room->removeDevice(deviceId);
+
+            if (roomWasCreated)
+            {
+                auto it = std::find_if(
+                    rooms.begin(), rooms.end(),
+                    [&roomName](const Room& room)
+                    {
+                        return room.getName() == roomName;
+                    });
+
+                if (it != rooms.end() &&
+                    it->getDeviceCount() == 0)
+                {
+                    rooms.erase(it);
+                }
+            }
+        }
+
+        throw;
+    }
 
     std::cout << "Temporary device added: "
               << deviceId << '\n';
 }
 
-// Remove a device
 bool SmartHome::removeDevice(const std::string& deviceId)
 {
-    if (deviceId.empty()) {
+    if (!deviceManager.removeDevice(deviceId))
         return false;
-    }
-
-    const bool removed = deviceManager.removeDevice(deviceId);
-
-    if (!removed) {
-        std::cout << "Device not found: "
-                  << deviceId << '\n';
-        return false;
-    }
 
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        for (auto& room : rooms) {
+        for (Room& room : rooms)
             room.removeDevice(deviceId);
-        }
     }
 
-    if (!database.deleteDevice(deviceId)) {
-        std::cerr << "Warning: Could not delete device from database.\n";
-    }
+    database.deleteDevice(deviceId);
 
-    std::cout << "Device removed: "
-              << deviceId << '\n';
-
+    std::cout << "Device removed: " << deviceId << '\n';
     return true;
 }
 
-// Turn a device on
 void SmartHome::turnOn(const std::string& deviceId)
 {
     deviceManager.turnOn(deviceId);
+
+    DeviceRecord record;
+
+    if (deviceManager.getDeviceRecord(deviceId, record))
+    {
+        if (!database.updateDevice(record))
+        {
+            std::cerr
+                << "Warning: Could not save device ON state to database.\n";
+        }
+    }
 }
 
-// Turn a device off
 void SmartHome::turnOff(const std::string& deviceId)
 {
     deviceManager.turnOff(deviceId);
+
+    DeviceRecord record;
+
+    if (deviceManager.getDeviceRecord(deviceId, record))
+    {
+        if (!database.updateDevice(record))
+        {
+            std::cerr
+                << "Warning: Could not save device OFF state to database.\n";
+        }
+    }
 }
 
-// Check whether a device exists
-bool SmartHome::hasDevice(const std::string& deviceId) const
-{
-    return deviceManager.hasDevice(deviceId);
-}
-
-// Display all rooms
 void SmartHome::showRooms()
 {
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    if (rooms.empty()) {
-        std::cout << "No rooms available.\n";
-        return;
-    }
+    std::cout << "\nRooms in " << homeName << ":\n";
 
-    std::cout << "\n===== ROOMS =====\n";
-
-    for (const auto& room : rooms) {
-        std::cout << "Room: " << room.getName()
-                  << " | Devices: "
-                  << room.getDeviceCount() << '\n';
-    }
-}
-
-// Display devices assigned to a room
-void SmartHome::showRoomDevices(
-    const std::string& roomName
-)
-{
-    std::vector<std::string> deviceIds;
-
+    for (const Room& room : rooms)
     {
-        std::lock_guard<std::mutex> lock(homeMutex);
-
-        const Room* room = findRoom(roomName);
-
-        if (room == nullptr) {
-            std::cout << "Room not found: "
-                      << roomName << '\n';
-            return;
-        }
-
-        deviceIds = room->getDeviceIds();
-    }
-
-    std::cout << "\n===== DEVICES IN "
-              << roomName << " =====\n";
-
-    if (deviceIds.empty()) {
-        std::cout << "No devices in this room.\n";
-        return;
-    }
-
-    for (const auto& id : deviceIds) {
-        std::cout << "Device ID: " << id << '\n';
+        std::cout << "- " << room.getName()
+                  << " (" << room.getDeviceCount()
+                  << " devices)\n";
     }
 }
 
-// Display all devices
+void SmartHome::showRoomDevices(const std::string& roomName)
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    const Room* room = findRoom(roomName);
+
+    if (room == nullptr)
+    {
+        std::cout << "Room not found: " << roomName << '\n';
+        return;
+    }
+
+    std::cout << "\nDevices in " << roomName << ":\n";
+
+    for (const std::string& id : room->getDeviceIds())
+    {
+        if (!deviceManager.showDeviceStatus(id))
+            std::cout << "Device unavailable: " << id << '\n';
+    }
+}
+
 void SmartHome::showAllDevices()
 {
     deviceManager.showAllDevices();
 }
 
-// Get room count
 int SmartHome::getRoomCount() const
 {
     std::lock_guard<std::mutex> lock(homeMutex);
-
     return static_cast<int>(rooms.size());
 }
 
-// Get device count
 int SmartHome::getDeviceCount()
 {
     return deviceManager.getDeviceCount();
 }
 
-// Get home name
 std::string SmartHome::getHomeName() const
 {
     return homeName;
 }
 
-// Handle a temporary device that has expired
 void SmartHome::handleExpiredDevice(
-    const std::string& deviceId
-)
+    const std::string& deviceId)
 {
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        for (auto& room : rooms) {
+        for (Room& room : rooms)
             room.removeDevice(deviceId);
-        }
     }
 
-    if (!database.deleteDevice(deviceId)) {
-        std::cerr << "Warning: Could not delete expired device from database.\n";
-    }
+    database.deleteDevice(deviceId);
 
     std::cout << "Temporary device expired and removed: "
               << deviceId << '\n';

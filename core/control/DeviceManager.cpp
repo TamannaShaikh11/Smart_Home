@@ -1,5 +1,5 @@
 #include "DeviceManager.h"
-
+#include "../storage/Database.h"
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
@@ -318,6 +318,42 @@ void DeviceManager::removeExpiredDevices()
             callback(id);
         }
     }
+}
+
+bool DeviceManager::getDeviceRecord(
+    const std::string& id,
+    DeviceRecord& record
+) const
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    for (const Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            record.id = device->getId();
+            record.name = device->getName();
+            record.type = device->getType();
+            record.roomName = device->getRoom();
+
+            record.status =
+                device->getStatus() == DeviceStatus::ON ? 1 : 0;
+
+            record.powerWatts = device->getPowerWatts();
+            record.runtimeMinutes = device->getRuntimeMinutes();
+            record.setting = device->getState().setting;
+
+            record.lifetime =
+                static_cast<int>(device->getLifetime());
+
+            record.expiryTime =
+                static_cast<long long>(device->getExpiryTime());
+
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void DeviceManager::expiryWorker()

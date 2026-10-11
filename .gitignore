@@ -1,2 +1,51 @@
-.vscode/
+
+# ==============================
+# React / Node.js
+# ==============================
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ==============================
+# Environment variables and secrets
+# ==============================
+.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# ==============================
+# SQLite database and temporary files
+# ==============================
+smarthome.db
+smarthome.db-journal
+smarthome.db-wal
+smarthome.db-shm
+
+# ==============================
+# Compiled C++ output
+# ==============================
+*.exe
+*.o
+*.obj
+*.out
+
+# ==============================
+# Logs and temporary files
+# ==============================
 *.log
+*.tmp
+*.temp
+
+# ==============================
+# Operating system files
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Personal editor settings
+# ==============================
+.vscode/

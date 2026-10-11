@@ -1,3 +1,4 @@
+
 #ifndef ROOM_H
 #define ROOM_H
 
@@ -15,8 +16,8 @@ public:
 
     std::string getName() const;
 
-    bool addDeviceId(const std::string& deviceId);
-    bool removeDeviceId(const std::string& deviceId);
+    void addDevice(const std::string& deviceId);
+    void removeDevice(const std::string& deviceId);
 
     bool hasDevice(const std::string& deviceId) const;
 

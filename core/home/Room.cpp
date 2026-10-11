@@ -1,18 +1,17 @@
+
 #include "Room.h"
 
 #include <algorithm>
 #include <stdexcept>
 
 Room::Room(const std::string& roomName)
+    : name(roomName)
 {
-    if (roomName.empty())
-    {
+    if (name.empty()) {
         throw std::invalid_argument(
             "Room name cannot be empty."
         );
     }
-
-    name = roomName;
 }
 
 std::string Room::getName() const
@@ -20,32 +19,25 @@ std::string Room::getName() const
     return name;
 }
 
-bool Room::addDeviceId(const std::string& deviceId)
+void Room::addDevice(const std::string& deviceId)
 {
-    if (deviceId.empty() || hasDevice(deviceId))
-    {
-        return false;
+    if (deviceId.empty() || hasDevice(deviceId)) {
+        return;
     }
 
     deviceIds.push_back(deviceId);
-    return true;
 }
 
-bool Room::removeDeviceId(const std::string& deviceId)
+void Room::removeDevice(const std::string& deviceId)
 {
-    auto it = std::find(
-        deviceIds.begin(),
-        deviceIds.end(),
-        deviceId
+    deviceIds.erase(
+        std::remove(
+            deviceIds.begin(),
+            deviceIds.end(),
+            deviceId
+        ),
+        deviceIds.end()
     );
-
-    if (it == deviceIds.end())
-    {
-        return false;
-    }
-
-    deviceIds.erase(it);
-    return true;
 }
 
 bool Room::hasDevice(const std::string& deviceId) const

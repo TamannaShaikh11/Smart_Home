@@ -1,3 +1,4 @@
+
 #ifndef SMARTHOME_H
 #define SMARTHOME_H
 
@@ -7,6 +8,7 @@
 
 #include "Room.h"
 #include "../control/DeviceManager.h"
+#include "../storage/Database.h"
 
 class SmartHome
 {
@@ -14,8 +16,11 @@ private:
     std::string homeName;
     std::vector<Room> rooms;
 
-    // DeviceManager is destroyed before the mutex and rooms.
     mutable std::mutex homeMutex;
+
+    // Database is declared before DeviceManager so that
+    // DeviceManager is destroyed first.
+    Database database;
     DeviceManager deviceManager;
 
     Room* findRoom(const std::string& roomName);
@@ -34,7 +39,7 @@ public:
 
     void addDevice(Appliance* device);
 
-    // lifetimeSeconds == 0 means manual removal only.
+    // Zero means manual removal only.
     void addTemporaryDevice(
         Appliance* device,
         int lifetimeSeconds

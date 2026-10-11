@@ -10,6 +10,11 @@ Light::Light(
     : Appliance(id, name, room, powerWatts) {
 }
 
+std::string Light::getType() const
+{
+    return "Light";
+}
+
 void Light::showStatus() const {
     std::cout << "\n[LIGHT]";
     Appliance::showStatus();

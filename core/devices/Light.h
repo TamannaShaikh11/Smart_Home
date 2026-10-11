@@ -13,6 +13,7 @@ public:
     );
 
     void showStatus() const override;
+    std::string getType() const override;
 };
 
 #endif

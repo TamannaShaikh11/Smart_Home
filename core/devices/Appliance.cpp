@@ -101,6 +101,20 @@ const DeviceState& Appliance::getState() const
     return state;
 }
 
+std::string Appliance::getType() const
+{
+    return "Appliance";
+}
+
+void Appliance::restoreState(
+    DeviceStatus savedStatus,
+    int savedRuntimeMinutes
+)
+{
+    state.status = savedStatus;
+    state.runtimeMinutes = savedRuntimeMinutes;
+}
+
 void Appliance::setRoom(const std::string& newRoom)
 {
     room = newRoom;

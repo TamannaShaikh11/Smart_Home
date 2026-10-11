@@ -29,6 +29,11 @@ int Fan::getSpeed() const {
     return speed;
 }
 
+std::string Fan::getType() const
+{
+    return "Fan";
+}
+
 void Fan::showStatus() const {
     std::cout << "\n[FAN]";
     Appliance::showStatus();

@@ -29,6 +29,11 @@ int AC::getTemperature() const {
     return temperature;
 }
 
+std::string AC::getType() const
+{
+    return "AC";
+}
+
 void AC::showStatus() const {
     std::cout << "\n[AIR CONDITIONER]";
     Appliance::showStatus();

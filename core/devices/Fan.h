@@ -19,6 +19,7 @@ public:
     int getSpeed() const;
 
     void showStatus() const override;
+    std::string getType() const override;
 };
 
 #endif

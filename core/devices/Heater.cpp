@@ -29,6 +29,11 @@ int Heater::getTemperature() const {
     return temperature;
 }
 
+std::string Heater::getType() const
+{
+    return "Heater";
+}
+
 void Heater::showStatus() const {
     std::cout << "\n[HEATER]";
     Appliance::showStatus();

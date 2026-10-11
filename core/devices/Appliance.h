@@ -41,7 +41,8 @@ public:
     int getRuntimeMinutes() const;
 
     const DeviceState& getState() const;
-
+    virtual std::string getType() const;
+    void restoreState(DeviceStatus savedStatus, int savedRuntimeMinutes);
     void setRoom(const std::string& newRoom);
 
     void setLifetime(

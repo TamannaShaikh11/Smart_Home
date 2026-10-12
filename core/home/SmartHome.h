@@ -1,4 +1,3 @@
-
 #ifndef SMARTHOME_H
 #define SMARTHOME_H
 
@@ -9,6 +8,7 @@
 #include "Room.h"
 #include "../control/DeviceManager.h"
 #include "../storage/Database.h"
+#include "../storage/EnergyTracker.h"
 
 class SmartHome
 {
@@ -21,6 +21,7 @@ private:
     // Database is declared before DeviceManager so that
     // DeviceManager is destroyed first.
     Database database;
+    EnergyTracker energyTracker;
     DeviceManager deviceManager;
 
     Room* findRoom(const std::string& roomName);
@@ -60,6 +61,11 @@ public:
     int getDeviceCount();
 
     std::string getHomeName() const;
+
+    // Read-only snapshots for the frontend API.
+    std::vector<std::string> getRoomNames() const;
+    std::vector<DeviceRecord> getAllDeviceRecords() const;
+    std::vector<EnergySessionRecord> getEnergySessions() const;
 };
 
 #endif

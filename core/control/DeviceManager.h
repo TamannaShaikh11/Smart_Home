@@ -58,7 +58,9 @@ public:
     void showAllDevices();
 
     int getDeviceCount() const;
-
+    // Safely copy the current records for all devices.
+    std::vector<DeviceRecord> getAllDeviceRecords() const;
+    
     // Safely copy a device's current state for database persistence.
     bool getDeviceRecord(
         const std::string& id,

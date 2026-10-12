@@ -356,6 +356,43 @@ bool DeviceManager::getDeviceRecord(
     return false;
 }
 
+
+std::vector<DeviceRecord> DeviceManager::getAllDeviceRecords() const
+{
+    std::vector<DeviceRecord> records;
+
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    records.reserve(devices.size());
+
+    for (const Appliance* device : devices)
+    {
+        DeviceRecord record;
+
+        record.id = device->getId();
+        record.name = device->getName();
+        record.type = device->getType();
+        record.roomName = device->getRoom();
+
+        record.status =
+            device->getStatus() == DeviceStatus::ON ? 1 : 0;
+
+        record.powerWatts = device->getPowerWatts();
+        record.runtimeMinutes = device->getRuntimeMinutes();
+        record.setting = device->getState().setting;
+
+        record.lifetime =
+            static_cast<int>(device->getLifetime());
+
+        record.expiryTime =
+            static_cast<long long>(device->getExpiryTime());
+
+        records.push_back(record);
+    }
+
+    return records;
+}
+
 void DeviceManager::expiryWorker()
 {
     std::unique_lock<std::mutex> lock(devicesMutex);

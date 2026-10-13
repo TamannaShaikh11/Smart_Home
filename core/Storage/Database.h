@@ -40,6 +40,13 @@ public:
     bool saveDevice(const DeviceRecord& device);
     bool updateDevice(const DeviceRecord& device);
     bool deleteDevice(const std::string& deviceId);
+    
+    bool renameRoom(
+        const std::string& oldName,
+        const std::string& newName
+    );
+
+    bool deleteRoom(const std::string& roomName);
 
     std::vector<std::string> loadRooms();
     std::vector<DeviceRecord> loadDevices();

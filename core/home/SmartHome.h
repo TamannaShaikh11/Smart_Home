@@ -38,6 +38,16 @@ public:
 
     bool addRoom(const std::string& roomName);
 
+    
+    bool renameRoom(
+        const std::string& oldName,
+        const std::string& newName
+    );
+
+    bool deleteRoom(const std::string& roomName);
+
+    bool roomExists(const std::string& roomName) const;
+
     void addDevice(Appliance* device);
 
     // Zero means manual removal only.

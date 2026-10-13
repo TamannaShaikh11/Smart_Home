@@ -343,3 +343,102 @@ sqlite3* Database::getConnection() const
 {
     return db;
 }
+
+
+bool Database::renameRoom(
+    const std::string& oldName,
+    const std::string& newName)
+{
+    if (oldName.empty() || newName.empty())
+        return false;
+
+    if (oldName == newName)
+        return true;
+
+    if (!execute("BEGIN TRANSACTION;"))
+        return false;
+
+    auto runUpdate = [this](
+        const char* sql,
+        const std::string& first,
+        const std::string& second) -> bool
+    {
+        sqlite3_stmt* stmt = nullptr;
+
+        if (sqlite3_prepare_v2(
+                db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        {
+            return false;
+        }
+
+        sqlite3_bind_text(
+            stmt, 1, first.c_str(), -1, SQLITE_TRANSIENT);
+
+        sqlite3_bind_text(
+            stmt, 2, second.c_str(), -1, SQLITE_TRANSIENT);
+
+        bool success = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_finalize(stmt);
+
+        return success;
+    };
+
+    bool success = runUpdate(
+        "INSERT INTO rooms(name) "
+        "SELECT ? WHERE EXISTS "
+        "(SELECT 1 FROM rooms WHERE name = ?);",
+        newName, oldName);
+
+    if (success)
+    {
+        success = runUpdate(
+            "UPDATE devices SET room_name = ? "
+            "WHERE room_name = ?;",
+            newName, oldName);
+    }
+
+    if (success)
+    {
+        success = runUpdate(
+            "DELETE FROM rooms WHERE name = ?;",
+            oldName, oldName);
+    }
+
+    if (success)
+        success = execute("COMMIT;");
+    else
+        execute("ROLLBACK;");
+
+    return success;
+}
+
+bool Database::deleteRoom(const std::string& roomName)
+{
+    if (roomName.empty())
+        return false;
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(
+            db,
+            "DELETE FROM rooms WHERE name = ? "
+            "AND NOT EXISTS "
+            "(SELECT 1 FROM devices WHERE room_name = ?);",
+            -1, &stmt, nullptr) != SQLITE_OK)
+    {
+        return false;
+    }
+
+    sqlite3_bind_text(
+        stmt, 1, roomName.c_str(), -1, SQLITE_TRANSIENT);
+
+    sqlite3_bind_text(
+        stmt, 2, roomName.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool success = sqlite3_step(stmt) == SQLITE_DONE;
+    int changed = sqlite3_changes(db);
+
+    sqlite3_finalize(stmt);
+
+    return success && changed > 0;
+}

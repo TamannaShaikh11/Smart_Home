@@ -1,511 +1,1026 @@
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import "./App.css";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 const API_URL = "http://localhost:8080/api";
 
-const roomIcons = {
-  "Living Room": "🛋️",
-  Bedroom: "🛏️",
-  Kitchen: "🍳",
-  "Study Room": "📚",
-  Bathroom: "🚿",
-  "Guest Room": "🛌",
+const DEFAULT_TARIFF = {
+  slab1: 3.96,
+  slab2: 10.8,
+  slab3: 15.03,
+  slab4: 17.53,
+  wheeling: 1.6,
+  fixedCharge: 100,
+  dutyPercent: 16,
 };
 
-const typeIcons = {
-  Light: "💡",
-  Fan: "🌀",
-  AC: "❄️",
-  Heater: "♨️",
-  Other: "🔌",
-};
+function formatDuration(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(seconds || 0));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
+
+function formatDate(timestamp) {
+  if (!timestamp || timestamp <= 0) return "—";
+
+  return new Date(timestamp * 1000).toLocaleString("en-IN", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+function calculateBill(units, tariff) {
+  const first = Math.min(units, 100);
+  const second = Math.min(Math.max(units - 100, 0), 200);
+  const third = Math.min(Math.max(units - 300, 0), 200);
+  const fourth = Math.max(units - 500, 0);
+
+  const energyCharge =
+    first * tariff.slab1 +
+    second * tariff.slab2 +
+    third * tariff.slab3 +
+    fourth * tariff.slab4;
+
+  const wheelingCharge = units * tariff.wheeling;
+  const fixedCharge = tariff.fixedCharge;
+  const duty = (energyCharge + wheelingCharge) * (tariff.dutyPercent / 100);
+
+  return {
+    units,
+    first,
+    second,
+    third,
+    fourth,
+    energyCharge,
+    wheelingCharge,
+    fixedCharge,
+    duty,
+    total: energyCharge + wheelingCharge + fixedCharge + duty,
+  };
+}
 
 function App() {
   const [rooms, setRooms] = useState([]);
   const [devices, setDevices] = useState([]);
-  const [selectedRoom, setSelectedRoom] = useState("All Rooms");
-  const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [busyDevices, setBusyDevices] = useState([]);
-  const [bulkBusy, setBulkBusy] = useState(false);
+  const [sessions, setSessions] = useState([]);
 
-  // Load real rooms and devices from the C++ API.
-  const loadData = useCallback(async (showLoading = false) => {
+  const [loading, setLoading] = useState(true);
+  const [energyLoading, setEnergyLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [energyError, setEnergyError] = useState("");
+
+  const [search, setSearch] = useState("");
+  const [selectedRoom, setSelectedRoom] = useState("All Rooms");
+  const [updatingDevices, setUpdatingDevices] = useState({});
+  const [bulkUpdating, setBulkUpdating] = useState(false);
+
+  const [tariff, setTariff] = useState(DEFAULT_TARIFF);
+
+  const [tariffInputs, setTariffInputs] = useState({
+    ...DEFAULT_TARIFF,
+  });
+
+  const [showTariffSettings, setShowTariffSettings] = useState(false);
+
+  const fetchJson = async (url, options = {}) => {
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+      throw new Error(`Request failed (${response.status})`);
+    }
+
+    return response.json();
+  };
+
+  const loadDashboard = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
 
     try {
-      const [roomsResponse, devicesResponse] = await Promise.all([
-        fetch(`${API_URL}/rooms`),
-        fetch(`${API_URL}/devices`),
+      const [roomsData, devicesData] = await Promise.all([
+        fetchJson(`${API_URL}/rooms`),
+        fetchJson(`${API_URL}/devices`),
       ]);
 
-      if (!roomsResponse.ok || !devicesResponse.ok) {
-        throw new Error("The SmartHomeOS API returned an error.");
-      }
-
-      const [roomData, deviceData] = await Promise.all([
-        roomsResponse.json(),
-        devicesResponse.json(),
-      ]);
-
-      if (!Array.isArray(roomData) || !Array.isArray(deviceData)) {
-        throw new Error("The API returned an unexpected data format.");
-      }
-
-      setRooms(
-        roomData.map((room) => ({
-          name: room.name,
-          icon: roomIcons[room.name] || "🏠",
-        }))
-      );
-
-      setDevices(
-        deviceData.map((device) => ({
-          ...device,
-          power: Number(device.powerWatts) || 0,
-          on: device.status === "ON",
-        }))
-      );
-
+      setRooms(Array.isArray(roomsData) ? roomsData : []);
+      setDevices(Array.isArray(devicesData) ? devicesData : []);
       setError("");
     } catch (err) {
       setError(
-        "Cannot connect to SmartHomeOS. Make sure SmartHomeAPI.exe is running on port 8080."
+        `Unable to load SmartHomeOS data. Check that SmartHomeAPI.exe is running. ${err.message}`
       );
     } finally {
-      if (showLoading) setLoading(false);
+      setLoading(false);
+    }
+  }, []);
+
+  const loadEnergySessions = useCallback(async () => {
+    try {
+      const data = await fetchJson(`${API_URL}/energy/sessions`);
+
+      const sessionList = Array.isArray(data)
+        ? data
+        : Array.isArray(data.value)
+          ? data.value
+          : [];
+
+      setSessions(sessionList);
+      setEnergyError("");
+    } catch (err) {
+      setEnergyError(
+        `Unable to load energy history. ${err.message}`
+      );
+    } finally {
+      setEnergyLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadData(true);
-  }, [loadData]);
+    loadDashboard(true);
+    loadEnergySessions();
 
-  const allDevices = devices;
+    const interval = setInterval(() => {
+      loadDashboard(false);
+      loadEnergySessions();
+    }, 10000);
 
-  const onCount = allDevices.filter((device) => device.on).length;
+    return () => clearInterval(interval);
+  }, [loadDashboard, loadEnergySessions]);
 
-  const totalPower = allDevices
-    .filter((device) => device.on)
-    .reduce((sum, device) => sum + device.power, 0);
+  const isDeviceOn = (device) => {
+    const state = device.state ?? device.status ?? device.isOn;
 
-  const visibleRooms = useMemo(() => {
-    return rooms
-      .filter(
-        (room) =>
-          selectedRoom === "All Rooms" || room.name === selectedRoom
-      )
-      .map((room) => ({
-        ...room,
-        devices: devices
-          .filter((device) => device.roomName === room.name)
-          .filter((device) =>
-            `${device.name} ${device.type} ${device.id} ${device.roomName}`
-              .toLowerCase()
-              .includes(search.toLowerCase())
-          ),
-      }))
-      .filter((room) => room.devices.length > 0);
-  }, [rooms, devices, selectedRoom, search]);
+    if (typeof state === "boolean") return state;
 
-  // Ask the C++ API to change the actual device state.
-  async function toggleDevice(deviceId, turnOn) {
-    if (busyDevices.includes(deviceId) || bulkBusy) return;
+    return String(state).toUpperCase() === "ON";
+  };
 
-    setBusyDevices((current) => [...current, deviceId]);
+  const getDeviceId = (device) =>
+    device.id ?? device.deviceId ?? device.name;
+
+  const getDeviceName = (device) =>
+    device.name ?? device.deviceName ?? "Unnamed device";
+
+  const getRoomName = (device) =>
+    device.roomName ?? device.room ?? "Unassigned";
+
+  const getDevicePower = (device) =>
+    Number(device.powerWatts ?? device.power ?? device.wattage ?? 0);
+
+  const totalPowerWatts = useMemo(
+    () =>
+      devices.reduce(
+        (total, device) =>
+          total + (isDeviceOn(device) ? getDevicePower(device) : 0),
+        0
+      ),
+    [devices]
+  );
+
+  const activeDevices = devices.filter(isDeviceOn).length;
+
+  const totalEnergyKwh = useMemo(
+    () =>
+      sessions.reduce(
+        (total, session) => total + Number(session.energyKwh || 0),
+        0
+      ),
+    [sessions]
+  );
+
+  const activeSessionCount = sessions.filter(
+    (session) => session.active || Number(session.endedAt) === 0
+  ).length;
+
+  const bill = useMemo(
+    () => calculateBill(totalEnergyKwh, tariff),
+    [totalEnergyKwh, tariff]
+  );
+
+  const filteredDevices = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return devices.filter((device) => {
+      const matchesRoom =
+        selectedRoom === "All Rooms" ||
+        getRoomName(device) === selectedRoom;
+
+      const matchesSearch =
+        !query ||
+        getDeviceName(device).toLowerCase().includes(query) ||
+        getRoomName(device).toLowerCase().includes(query);
+
+      return matchesRoom && matchesSearch;
+    });
+  }, [devices, search, selectedRoom]);
+
+  const deviceGroups = useMemo(() => {
+    const groups = {};
+
+    filteredDevices.forEach((device) => {
+      const roomName = getRoomName(device);
+
+      if (!groups[roomName]) groups[roomName] = [];
+      groups[roomName].push(device);
+    });
+
+    return groups;
+  }, [filteredDevices]);
+
+  const updateDevicePower = async (device, turnOn) => {
+    const id = getDeviceId(device);
+
+    if (id == null) {
+      setError("This device does not have a valid ID.");
+      return;
+    }
+
+    setUpdatingDevices((current) => ({ ...current, [id]: true }));
     setError("");
 
     try {
-      const response = await fetch(
-        `${API_URL}/devices/${encodeURIComponent(deviceId)}/power`,
+      await fetchJson(
+        `${API_URL}/devices/${encodeURIComponent(id)}/power`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ on: turnOn }),
         }
       );
 
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || "Could not update the device.");
-      }
-
-      // Read back the saved state from the backend.
-      await loadData();
+      await loadDashboard(false);
+      await loadEnergySessions();
     } catch (err) {
-      setError(err.message || "Failed to update the device.");
+      setError(`Could not update ${getDeviceName(device)}: ${err.message}`);
     } finally {
-      setBusyDevices((current) =>
-        current.filter((id) => id !== deviceId)
-      );
+      setUpdatingDevices((current) => ({ ...current, [id]: false }));
     }
-  }
+  };
 
-  // Bulk actions use the existing individual-device API.
-  async function toggleAll(turnOn) {
-    if (bulkBusy || busyDevices.length > 0) return;
+  const bulkToggle = async (turnOn) => {
+    const targets = filteredDevices.filter(
+      (device) => isDeviceOn(device) !== turnOn
+    );
 
-    setBulkBusy(true);
+    if (targets.length === 0) return;
+
+    setBulkUpdating(true);
     setError("");
 
-    try {
-      const results = await Promise.all(
-        allDevices.map(async (device) => {
-          const response = await fetch(
-            `${API_URL}/devices/${encodeURIComponent(device.id)}/power`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ on: turnOn }),
-            }
-          );
+    const results = await Promise.allSettled(
+      targets.map((device) => {
+        const id = getDeviceId(device);
 
-          if (!response.ok) {
-            const result = await response.json().catch(() => ({}));
-            throw new Error(
-              `${device.name}: ${result.error || "request failed"}`
-            );
+        return fetchJson(
+          `${API_URL}/devices/${encodeURIComponent(id)}/power`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ on: turnOn }),
           }
+        );
+      })
+    );
 
-          return device.id;
-        })
-      );
+    const failed = results.filter(
+      (result) => result.status === "rejected"
+    ).length;
 
-      await loadData();
-
-      if (results.length !== allDevices.length) {
-        setError("Some devices may not have been updated.");
-      }
-    } catch (err) {
-      setError(
-        `${err.message} Refreshing device states from the backend.`
-      );
-      await loadData();
-    } finally {
-      setBulkBusy(false);
+    if (failed > 0) {
+      setError(`${failed} device update(s) failed.`);
     }
-  }
+
+    await loadDashboard(false);
+    await loadEnergySessions();
+    setBulkUpdating(false);
+  };
+
+  const handleTariffInput = (key, value) => {
+    setTariffInputs((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  };
+
+  const saveTariffSettings = (event) => {
+    event.preventDefault();
+
+    const nextTariff = {};
+
+    for (const key of Object.keys(DEFAULT_TARIFF)) {
+      const value = Number(tariffInputs[key]);
+
+      if (!Number.isFinite(value) || value < 0) {
+        setError("Tariff values must be valid non-negative numbers.");
+        return;
+      }
+
+      nextTariff[key] = value;
+    }
+
+    setTariff(nextTariff);
+    setTariffInputs({ ...nextTariff });
+    setShowTariffSettings(false);
+    setError("");
+  };
+
+  const resetTariff = () => {
+    setTariff(DEFAULT_TARIFF);
+    setTariffInputs({ ...DEFAULT_TARIFF });
+  };
+
+  const styles = {
+    page: {
+      minHeight: "100vh",
+      padding: "24px",
+      background: "var(--bg, #0b1120)",
+      color: "var(--text, #e5e7eb)",
+      fontFamily: "Inter, system-ui, sans-serif",
+      boxSizing: "border-box",
+    },
+    container: {
+      maxWidth: "1400px",
+      margin: "0 auto",
+    },
+    header: {
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: "16px",
+      marginBottom: "24px",
+    },
+    title: {
+      margin: 0,
+      fontSize: "clamp(26px, 4vw, 36px)",
+    },
+    subtitle: {
+      margin: "8px 0 0",
+      color: "var(--muted, #94a3b8)",
+    },
+    button: {
+      border: "1px solid var(--border, #334155)",
+      background: "var(--card-bg, #111827)",
+      color: "var(--text, #e5e7eb)",
+      padding: "10px 14px",
+      borderRadius: "10px",
+      cursor: "pointer",
+      fontWeight: 600,
+    },
+    primaryButton: {
+      border: "none",
+      background: "#6366f1",
+      color: "#fff",
+      padding: "10px 14px",
+      borderRadius: "10px",
+      cursor: "pointer",
+      fontWeight: 600,
+    },
+    grid: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+      gap: "16px",
+      marginBottom: "24px",
+    },
+    panel: {
+      background: "var(--card-bg, #111827)",
+      border: "1px solid var(--border, #263244)",
+      borderRadius: "16px",
+      padding: "20px",
+      marginBottom: "24px",
+      minWidth: 0,
+    },
+    statLabel: {
+      color: "var(--muted, #94a3b8)",
+      fontSize: "14px",
+    },
+    statValue: {
+      fontSize: "28px",
+      fontWeight: 750,
+      marginTop: "10px",
+      overflowWrap: "anywhere",
+    },
+    input: {
+      width: "100%",
+      boxSizing: "border-box",
+      padding: "10px 12px",
+      border: "1px solid var(--border, #334155)",
+      borderRadius: "9px",
+      background: "var(--bg, #0b1120)",
+      color: "var(--text, #e5e7eb)",
+    },
+    sectionTitle: {
+      margin: "0 0 16px",
+      fontSize: "21px",
+    },
+    tableWrap: {
+      overflowX: "auto",
+      width: "100%",
+    },
+    table: {
+      borderCollapse: "collapse",
+      width: "100%",
+      minWidth: "760px",
+      fontSize: "14px",
+    },
+    th: {
+      textAlign: "left",
+      padding: "12px 10px",
+      borderBottom: "1px solid var(--border, #334155)",
+      color: "var(--muted, #94a3b8)",
+      whiteSpace: "nowrap",
+    },
+    td: {
+      padding: "12px 10px",
+      borderBottom: "1px solid var(--border, #263244)",
+      whiteSpace: "nowrap",
+    },
+    muted: {
+      color: "var(--muted, #94a3b8)",
+    },
+    badge: {
+      display: "inline-block",
+      borderRadius: "999px",
+      padding: "4px 9px",
+      fontSize: "12px",
+      fontWeight: 700,
+    },
+  };
+
+  const statCard = (label, value, detail) => (
+    <div key={label} style={styles.panel}>
+      <div style={styles.statLabel}>{label}</div>
+      <div style={styles.statValue}>{value}</div>
+      {detail && (
+        <div style={{ ...styles.muted, fontSize: "13px", marginTop: "8px" }}>
+          {detail}
+        </div>
+      )}
+    </div>
+  );
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">⌂</div>
+    <div style={styles.page}>
+      <div style={styles.container}>
+        <header style={styles.header}>
           <div>
-            <h2>
-              SmartHome<span>OS</span>
-            </h2>
-            <p>HOME CONTROL CENTER</p>
-          </div>
-        </div>
-
-        <div className="nav-label">WORKSPACE</div>
-
-        <button
-          className={`nav-item ${
-            selectedRoom === "All Rooms" ? "active" : ""
-          }`}
-          onClick={() => setSelectedRoom("All Rooms")}
-        >
-          <span>▦</span> Overview
-        </button>
-
-        <div className="nav-label room-label">YOUR ROOMS</div>
-
-        {rooms.map((room) => (
-          <button
-            key={room.name}
-            className={`nav-item ${
-              selectedRoom === room.name ? "active" : ""
-            }`}
-            onClick={() => setSelectedRoom(room.name)}
-          >
-            <span>{room.icon}</span>
-            {room.name}
-            <small>
-              {devices.filter((device) => device.roomName === room.name).length}
-            </small>
-          </button>
-        ))}
-
-        <div className="sidebar-bottom">
-          <div className="connection-dot" />
-          <div>
-            <strong>Local system</strong>
-            <p>{error ? "Connection issue" : "C++ API connected"}</p>
-          </div>
-        </div>
-      </aside>
-
-      <main className="main-content">
-        <header className="topbar">
-          <div className="breadcrumb">
-            SmartHomeOS <span>/</span> Dashboard
-          </div>
-
-          <div className="topbar-right">
-            <span className="preview-pill">
-              <i />
-              Live backend
-            </span>
-            <div className="avatar">T</div>
-          </div>
-        </header>
-
-        <section className="welcome-row">
-          <div>
-            <p className="eyebrow">YOUR HOME AT A GLANCE</p>
-            <h1>
-              Good to see you<span>.</span>
-            </h1>
-            <p className="subtitle">
-              Everything in your home, all in one place.
+            <h1 style={styles.title}>SmartHomeOS</h1>
+            <p style={styles.subtitle}>
+              Smart control, energy monitoring and electricity bill estimates
             </p>
           </div>
 
-          <div className="date-card">
-            <span>⌂</span>
-            <div>
-              <strong>My Smart Home</strong>
-              <p>{rooms.length} rooms · Local control</p>
-            </div>
-          </div>
-        </section>
+          <button
+            style={styles.button}
+            onClick={() => {
+              loadDashboard(true);
+              loadEnergySessions();
+            }}
+          >
+            ↻ Refresh dashboard
+          </button>
+        </header>
 
         {error && (
           <div
             role="alert"
             style={{
-              padding: "12px 16px",
-              marginBottom: "16px",
-              borderRadius: "10px",
-              background: "#fff0f0",
-              color: "#a12626",
+              ...styles.panel,
+              borderColor: "#ef4444",
+              color: "#fca5a5",
             }}
           >
             {error}
-            <button
-              className="text-button"
-              style={{ marginLeft: "12px" }}
-              onClick={() => loadData(true)}
-            >
-              Retry
-            </button>
           </div>
         )}
 
-        <section className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Total devices</span>
-              <span className="stat-icon purple">▦</span>
+        {loading ? (
+          <div style={styles.panel}>Loading your smart home...</div>
+        ) : (
+          <>
+            <div style={styles.grid}>
+              {statCard("Total devices", devices.length, "Across your home")}
+              {statCard(
+                "Devices running",
+                `${activeDevices} / ${devices.length}`,
+                "Currently switched ON"
+              )}
+              {statCard(
+                "Active power",
+                `${(totalPowerWatts / 1000).toFixed(3)} kW`,
+                `${totalPowerWatts.toLocaleString("en-IN")} watts`
+              )}
+              {statCard("Rooms", rooms.length, "Configured rooms")}
             </div>
-            <strong>{loading ? "—" : allDevices.length}</strong>
-            <p>Across {rooms.length} rooms</p>
-          </div>
 
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Devices running</span>
-              <span className="stat-icon green">◉</span>
-            </div>
-            <strong>
-              {loading ? "—" : onCount}
-              <small> / {loading ? "—" : allDevices.length}</small>
-            </strong>
-            <p className="positive">
-              ● {loading ? "—" : allDevices.length - onCount} switched off
-            </p>
-          </div>
+            <section style={styles.panel}>
+              <h2 style={styles.sectionTitle}>Energy Monitor</h2>
 
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Active power</span>
-              <span className="stat-icon amber">ϟ</span>
-            </div>
-            <strong>
-              {loading ? "—" : (totalPower / 1000).toFixed(2)}
-              <small> kW</small>
-            </strong>
-            <p>Based on enabled devices</p>
-          </div>
+              {energyError && (
+                <p style={{ color: "#fca5a5" }}>{energyError}</p>
+              )}
 
-          <div className="stat-card">
-            <div className="stat-top">
-              <span>Rooms</span>
-              <span className="stat-icon blue">⌂</span>
-            </div>
-            <strong>{loading ? "—" : rooms.length}</strong>
-            <p>Ready to manage</p>
-          </div>
-        </section>
+              <div style={styles.grid}>
+                {statCard(
+                  "Recorded energy",
+                  `${totalEnergyKwh.toFixed(4)} kWh`,
+                  "Sum of recorded energy sessions"
+                )}
+                {statCard(
+                  "Active sessions",
+                  activeSessionCount,
+                  "Devices with ongoing sessions"
+                )}
+                {statCard(
+                  "Estimated bill",
+                  `₹${bill.total.toFixed(2)}`,
+                  "Based on current tariff settings"
+                )}
+              </div>
 
-        <section className="devices-section">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">CONTROL CENTER</p>
-              <h2>
-                {selectedRoom === "All Rooms"
-                  ? "Your devices"
-                  : selectedRoom}
-              </h2>
-              <p className="subtitle">
-                Check status and control each appliance.
+              <p style={styles.muted}>
+                Energy usage is estimated from rated device power and operating
+                time. It is not a physical meter reading.
               </p>
-            </div>
+            </section>
 
-            <div className="bulk-actions">
-              <button
-                className="secondary-button"
-                onClick={() => toggleAll(true)}
-                disabled={loading || bulkBusy || allDevices.length === 0}
+            <section style={styles.panel}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: "12px",
+                  marginBottom: "16px",
+                }}
               >
-                {bulkBusy ? "Updating..." : "Turn all on"}
-              </button>
+                <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
+                  Electricity Bill Estimator
+                </h2>
 
-              <button
-                className="secondary-button"
-                onClick={() => toggleAll(false)}
-                disabled={loading || bulkBusy || allDevices.length === 0}
-              >
-                {bulkBusy ? "Updating..." : "Turn all off"}
-              </button>
-            </div>
-          </div>
+                <button
+                  style={styles.button}
+                  onClick={() => setShowTariffSettings((value) => !value)}
+                >
+                  {showTariffSettings ? "Hide tariff settings" : "Edit tariff"}
+                </button>
+              </div>
 
-          <div className="toolbar">
-            <div className="search-box">
-              <span>⌕</span>
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search devices..."
-                aria-label="Search devices"
-              />
-            </div>
-
-            <span className="result-count">
-              {visibleRooms.reduce(
-                (sum, room) => sum + room.devices.length,
-                0
-              )}{" "}
-              devices shown
-            </span>
-          </div>
-
-          {loading ? (
-            <div className="empty-state">
-              <h3>Loading your smart home...</h3>
-              <p>Connecting to the C++ backend and SQLite.</p>
-            </div>
-          ) : visibleRooms.length === 0 ? (
-            <div className="empty-state">
-              <span>⌕</span>
-              <h3>No devices found</h3>
-              <p>
-                Try a different search term or choose another room.
+              <p style={styles.muted}>
+                MSEDCL-inspired residential slab assumptions. The calculation
+                below applies each energy rate progressively to the units
+                recorded by SmartHomeOS.
               </p>
-            </div>
-          ) : (
-            visibleRooms.map((room) => (
-              <div className="room-section" key={room.name}>
-                <div className="room-heading">
-                  <div className="room-title">
-                    <span className="room-emoji">{room.icon}</span>
-                    <h3>{room.name}</h3>
-                    <span className="room-count">
-                      {room.devices.length}
-                    </span>
+
+              {showTariffSettings && (
+                <form
+                  onSubmit={saveTariffSettings}
+                  style={{
+                    border: "1px solid var(--border, #334155)",
+                    borderRadius: "12px",
+                    padding: "16px",
+                    margin: "18px 0",
+                  }}
+                >
+                  <h3 style={{ marginTop: 0 }}>Tariff settings</h3>
+
+                  <div style={styles.grid}>
+                    {[
+                      ["slab1", "First 100 units (₹/unit)"],
+                      ["slab2", "101–300 units (₹/unit)"],
+                      ["slab3", "301–500 units (₹/unit)"],
+                      ["slab4", "Above 500 units (₹/unit)"],
+                      ["wheeling", "Wheeling charge (₹/unit)"],
+                      ["fixedCharge", "Fixed charge (₹/billing period)"],
+                      ["dutyPercent", "Electricity duty (%)"],
+                    ].map(([key, label]) => (
+                      <label key={key} style={{ display: "block" }}>
+                        <span
+                          style={{
+                            display: "block",
+                            marginBottom: "7px",
+                            fontSize: "13px",
+                          }}
+                        >
+                          {label}
+                        </span>
+                        <input
+                          style={styles.input}
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={tariffInputs[key]}
+                          onChange={(event) =>
+                            handleTariffInput(key, event.target.value)
+                          }
+                          required
+                        />
+                      </label>
+                    ))}
                   </div>
 
-                  <button
-                    className="text-button"
-                    onClick={() => setSelectedRoom(room.name)}
-                  >
-                    View room →
-                  </button>
-                </div>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                    <button type="submit" style={styles.primaryButton}>
+                      Apply rates
+                    </button>
+                    <button
+                      type="button"
+                      style={styles.button}
+                      onClick={resetTariff}
+                    >
+                      Reset defaults
+                    </button>
+                  </div>
 
-                <div className="device-grid">
-                  {room.devices.map((device) => {
-                    const busy =
-                      busyDevices.includes(device.id) || bulkBusy;
+                  <p style={{ ...styles.muted, fontSize: "12px" }}>
+                    These settings currently remain in React state and reset
+                    when the page reloads. Saving them to SQLite is a separate
+                    next step.
+                  </p>
+                </form>
+              )}
 
-                    return (
-                      <article
-                        className={`device-card ${
-                          device.on ? "device-on" : ""
-                        }`}
-                        key={device.id}
-                      >
-                        <div className="device-card-top">
-                          <div
-                            className={`device-icon ${
-                              device.on ? "icon-on" : ""
-                            }`}
-                          >
-                            {typeIcons[device.type] || "🔌"}
-                          </div>
-
-                          <span
-                            className={`status-tag ${
-                              device.on ? "status-on" : "status-off"
-                            }`}
-                          >
-                            <i /> {device.on ? "ON" : "OFF"}
-                          </span>
-                        </div>
-
-                        <h4>{device.name}</h4>
-                        <p className="device-type">
-                          {device.type} · {device.power} W
-                        </p>
-
-                        <div className="device-card-bottom">
-                          <span className="device-id">{device.id}</span>
-
-                          <button
-                            className={`toggle ${
-                              device.on ? "toggle-on" : ""
-                            }`}
-                            onClick={() =>
-                              toggleDevice(device.id, !device.on)
-                            }
-                            disabled={busy}
-                            role="switch"
-                            aria-checked={device.on}
-                            aria-label={`Turn ${
-                              device.on ? "off" : "on"
-                            } ${device.name}`}
-                          >
-                            <span />
-                          </button>
-                        </div>
-
-                        {busy && (
-                          <p className="device-type">Updating...</p>
-                        )}
-                      </article>
-                    );
-                  })}
-                </div>
+              <div style={styles.grid}>
+                {statCard(
+                  "Recorded units",
+                  `${bill.units.toFixed(4)} kWh`,
+                  "1 kWh equals 1 electricity unit"
+                )}
+                {statCard(
+                  "Energy charges",
+                  `₹${bill.energyCharge.toFixed(2)}`,
+                  "Calculated progressively by slab"
+                )}
+                {statCard(
+                  "Additional charges",
+                  `₹${(bill.wheelingCharge + bill.fixedCharge + bill.duty).toFixed(2)}`,
+                  "Wheeling + fixed charge + duty"
+                )}
+                {statCard(
+                  "Estimated total",
+                  `₹${bill.total.toFixed(2)}`,
+                  "For the configured billing period"
+                )}
               </div>
-            ))
-          )}
-        </section>
 
-        <footer className="footer">
-          <span>SmartHomeOS · C++ core + SQLite</span>
-          <span>Device controls connected to local API</span>
+              <h3>Charge breakdown</h3>
+
+              <div style={styles.tableWrap}>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>Charge</th>
+                      <th style={styles.th}>Calculation</th>
+                      <th style={styles.th}>Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style={styles.td}>First 100 units</td>
+                      <td style={styles.td}>
+                        {bill.first.toFixed(4)} × ₹{tariff.slab1.toFixed(2)}
+                      </td>
+                      <td style={styles.td}>
+                        ₹{(bill.first * tariff.slab1).toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>101–300 units</td>
+                      <td style={styles.td}>
+                        {bill.second.toFixed(4)} × ₹{tariff.slab2.toFixed(2)}
+                      </td>
+                      <td style={styles.td}>
+                        ₹{(bill.second * tariff.slab2).toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>301–500 units</td>
+                      <td style={styles.td}>
+                        {bill.third.toFixed(4)} × ₹{tariff.slab3.toFixed(2)}
+                      </td>
+                      <td style={styles.td}>
+                        ₹{(bill.third * tariff.slab3).toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>Above 500 units</td>
+                      <td style={styles.td}>
+                        {bill.fourth.toFixed(4)} × ₹{tariff.slab4.toFixed(2)}
+                      </td>
+                      <td style={styles.td}>
+                        ₹{(bill.fourth * tariff.slab4).toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>Wheeling charges</td>
+                      <td style={styles.td}>
+                        {bill.units.toFixed(4)} × ₹{tariff.wheeling.toFixed(2)}
+                      </td>
+                      <td style={styles.td}>
+                        ₹{bill.wheelingCharge.toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>Fixed charge</td>
+                      <td style={styles.td}>Configured amount</td>
+                      <td style={styles.td}>
+                        ₹{bill.fixedCharge.toFixed(2)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style={styles.td}>Electricity duty</td>
+                      <td style={styles.td}>
+                        {tariff.dutyPercent}% of energy + wheeling charges
+                      </td>
+                      <td style={styles.td}>₹{bill.duty.toFixed(2)}</td>
+                    </tr>
+                    <tr>
+                      <td style={{ ...styles.td, fontWeight: 800 }}>
+                        Estimated total
+                      </td>
+                      <td style={styles.td}>All charges added</td>
+                      <td style={{ ...styles.td, fontWeight: 800 }}>
+                        ₹{bill.total.toFixed(2)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p style={{ ...styles.muted, fontSize: "12px", marginTop: "16px" }}>
+                This is an illustrative estimate, not an official MSEDCL bill.
+                The configured ₹100 fixed charge and 16% duty are assumptions
+                that you should verify for your consumer category. Actual bills
+                can include other charges, credits, taxes and adjustments.
+                This calculation uses all recorded sessions and does not yet
+                filter energy by a calendar billing period.
+              </p>
+            </section>
+
+            <section style={styles.panel}>
+              <h2 style={styles.sectionTitle}>Rooms and Devices</h2>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                  gap: "12px",
+                  marginBottom: "18px",
+                }}
+              >
+                <label>
+                  <span style={{ display: "block", marginBottom: "7px" }}>
+                    Search devices
+                  </span>
+                  <input
+                    style={styles.input}
+                    placeholder="Search device or room..."
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </label>
+
+                <label>
+                  <span style={{ display: "block", marginBottom: "7px" }}>
+                    Filter by room
+                  </span>
+                  <select
+                    style={styles.input}
+                    value={selectedRoom}
+                    onChange={(event) => setSelectedRoom(event.target.value)}
+                  >
+                    <option value="All Rooms">All Rooms</option>
+                    {rooms.map((room) => {
+                      const roomName =
+                        typeof room === "string"
+                          ? room
+                          : room.name ?? room.roomName;
+
+                      return roomName ? (
+                        <option key={roomName} value={roomName}>
+                          {roomName}
+                        </option>
+                      ) : null;
+                    })}
+                  </select>
+                </label>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: "10px",
+                  flexWrap: "wrap",
+                  marginBottom: "22px",
+                }}
+              >
+                <button
+                  style={styles.primaryButton}
+                  disabled={bulkUpdating}
+                  onClick={() => bulkToggle(true)}
+                >
+                  Turn filtered devices ON
+                </button>
+                <button
+                  style={styles.button}
+                  disabled={bulkUpdating}
+                  onClick={() => bulkToggle(false)}
+                >
+                  Turn filtered devices OFF
+                </button>
+              </div>
+
+              {Object.keys(deviceGroups).length === 0 ? (
+                <p style={styles.muted}>No devices match your search.</p>
+              ) : (
+                Object.entries(deviceGroups).map(([roomName, roomDevices]) => (
+                  <div key={roomName} style={{ marginBottom: "24px" }}>
+                    <h3 style={{ marginBottom: "12px" }}>{roomName}</h3>
+
+                    <div style={styles.grid}>
+                      {roomDevices.map((device) => {
+                        const id = getDeviceId(device);
+                        const on = isDeviceOn(device);
+                        const power = getDevicePower(device);
+                        const busy = Boolean(updatingDevices[id]);
+
+                        return (
+                          <div
+                            key={id}
+                            style={{
+                              ...styles.panel,
+                              marginBottom: 0,
+                              borderColor: on ? "#6366f1" : undefined,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: "10px",
+                                alignItems: "flex-start",
+                              }}
+                            >
+                              <div>
+                                <h4 style={{ margin: "0 0 8px" }}>
+                                  {getDeviceName(device)}
+                                </h4>
+                                <p style={{ ...styles.muted, margin: 0 }}>
+                                  {power} W rated power
+                                </p>
+                              </div>
+
+                              <span
+                                style={{
+                                  ...styles.badge,
+                                  background: on
+                                    ? "rgba(34,197,94,0.15)"
+                                    : "rgba(148,163,184,0.12)",
+                                  color: on ? "#4ade80" : "#94a3b8",
+                                }}
+                              >
+                                {on ? "ON" : "OFF"}
+                              </span>
+                            </div>
+
+                            <button
+                              style={{
+                                ...(on ? styles.button : styles.primaryButton),
+                                width: "100%",
+                                marginTop: "18px",
+                                opacity: busy ? 0.6 : 1,
+                              }}
+                              disabled={busy}
+                              onClick={() => updateDevicePower(device, !on)}
+                            >
+                              {busy
+                                ? "Updating..."
+                                : on
+                                  ? "Turn OFF"
+                                  : "Turn ON"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))
+              )}
+            </section>
+
+            <section style={styles.panel}>
+              <h2 style={styles.sectionTitle}>Energy Session History</h2>
+
+              {energyLoading ? (
+                <p style={styles.muted}>Loading energy sessions...</p>
+              ) : sessions.length === 0 ? (
+                <p style={styles.muted}>
+                  No energy sessions recorded yet. Turn a device ON to start
+                  tracking its estimated usage.
+                </p>
+              ) : (
+                <div style={styles.tableWrap}>
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Device</th>
+                        <th style={styles.th}>Room</th>
+                        <th style={styles.th}>Power</th>
+                        <th style={styles.th}>Duration</th>
+                        <th style={styles.th}>Energy</th>
+                        <th style={styles.th}>Status</th>
+                        <th style={styles.th}>Started</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...sessions]
+                        .sort(
+                          (a, b) =>
+                            Number(b.startedAt || 0) -
+                            Number(a.startedAt || 0)
+                        )
+                        .map((session, index) => {
+                          const active =
+                            session.active || Number(session.endedAt) === 0;
+
+                          const durationSeconds = active
+                            ? Math.max(
+                                0,
+                                Math.floor(Date.now() / 1000) -
+                                  Number(session.startedAt || 0)
+                              )
+                            : Math.max(
+                                0,
+                                Number(session.endedAt || 0) -
+                                  Number(session.startedAt || 0)
+                              );
+
+                          return (
+                            <tr
+                              key={session.id ?? `${session.deviceId}-${index}`}
+                            >
+                              <td style={styles.td}>
+                                {session.deviceName ?? "Unknown device"}
+                              </td>
+                              <td style={styles.td}>
+                                {session.roomName ?? "—"}
+                              </td>
+                              <td style={styles.td}>
+                                {Number(session.powerWatts || 0)} W
+                              </td>
+                              <td style={styles.td}>
+                                {formatDuration(durationSeconds)}
+                              </td>
+                              <td style={styles.td}>
+                                {Number(session.energyKwh || 0).toFixed(5)} kWh
+                              </td>
+                              <td style={styles.td}>
+                                <span
+                                  style={{
+                                    ...styles.badge,
+                                    background: active
+                                      ? "rgba(34,197,94,0.15)"
+                                      : "rgba(148,163,184,0.12)",
+                                    color: active ? "#4ade80" : "#94a3b8",
+                                  }}
+                                >
+                                  {active ? "ACTIVE" : "COMPLETED"}
+                                </span>
+                              </td>
+                              <td style={styles.td}>
+                                {formatDate(Number(session.startedAt || 0))}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+
+        <footer
+          style={{
+            ...styles.muted,
+            fontSize: "12px",
+            textAlign: "center",
+            padding: "10px 0 24px",
+          }}
+        >
+          SmartHomeOS · Energy values are software estimates, not meter readings.
         </footer>
-      </main>
+      </div>
     </div>
   );
 }

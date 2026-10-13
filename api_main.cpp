@@ -20,148 +20,368 @@ int main()
         httplib::Server server;
 
         // Allow requests from the React/Vite development server.
-        server.set_default_headers({
-            {"Access-Control-Allow-Origin", "http://localhost:5173"},
-            {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
-            {"Access-Control-Allow-Headers", "Content-Type"}
-        });
+        server.set_default_headers({{"Access-Control-Allow-Origin", "http://localhost:5173"},
+                                    {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
+                                    {"Access-Control-Allow-Headers", "Content-Type"}});
 
         // Handle browser CORS preflight requests.
         server.Options(R"(/api/.*)",
-            [](const httplib::Request&, httplib::Response& res)
-            {
-                res.status = 204;
-            });
+                       [](const httplib::Request &, httplib::Response &res)
+                       {
+                           res.status = 204;
+                       });
 
         // GET /api/rooms
         server.Get("/api/rooms",
-            [&home](const httplib::Request&, httplib::Response& res)
+                   [&home](const httplib::Request &, httplib::Response &res)
+                   {
+                       json result = json::array();
+
+                       for (const std::string &roomName : home.getRoomNames())
+                       {
+                           result.push_back({{"name", roomName}});
+                       }
+
+                       res.set_content(result.dump(), "application/json");
+                   });
+
+        // Create a room
+        server.Post("/api/rooms", [&home](const httplib::Request &req,
+                                          httplib::Response &res)
+                    {
+        try
+        {
+            json body = json::parse(req.body);
+
+            if (!body.contains("name") || !body["name"].is_string())
             {
-                json result = json::array();
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"Room name is required."})",
+                    "application/json"
+                );
+                return;
+            }
 
-                for (const std::string& roomName : home.getRoomNames())
-                {
-                    result.push_back({
-                        {"name", roomName}
+            std::string name = body["name"].get<std::string>();
+
+            if (name.find_first_not_of(" \t\n\r") == std::string::npos)
+            {
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"Room name cannot be empty."})",
+                    "application/json"
+                );
+                return;
+            }
+
+            if (home.roomExists(name))
+            {
+                res.status = 409;
+                res.set_content(
+                    R"({"error":"A room with this name already exists."})",
+                    "application/json"
+                );
+                return;
+            }
+
+            if (!home.addRoom(name))
+            {
+                res.status = 500;
+                res.set_content(
+                    R"({"error":"Could not create room."})",
+                    "application/json"
+                );
+                return;
+            }
+
+            res.status = 201;
+            res.set_content(
+                json({{"message", "Room created successfully."},
+                      {"name", name}}).dump(),
+                "application/json"
+            );
+        }
+        catch (const std::exception&)
+        {
+            res.status = 400;
+            res.set_content(
+                R"({"error":"Invalid JSON request."})",
+                "application/json"
+            );
+        } });
+
+        // Rename a room
+        server.Post("/api/rooms/rename",
+                    [&home](const httplib::Request &req,
+                            httplib::Response &res)
+                    {
+                        try
+                        {
+                            json body = json::parse(req.body);
+
+                            if (!body.contains("oldName") ||
+                                !body.contains("newName") ||
+                                !body["oldName"].is_string() ||
+                                !body["newName"].is_string())
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"Both oldName and newName are required."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            std::string oldName = body["oldName"].get<std::string>();
+                            std::string newName = body["newName"].get<std::string>();
+
+                            if (newName.find_first_not_of(" \t\n\r") == std::string::npos)
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"New room name cannot be empty."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (!home.roomExists(oldName))
+                            {
+                                res.status = 404;
+                                res.set_content(
+                                    R"({"error":"Room not found."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (oldName != newName && home.roomExists(newName))
+                            {
+                                res.status = 409;
+                                res.set_content(
+                                    R"({"error":"A room with the new name already exists."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (!home.renameRoom(oldName, newName))
+                            {
+                                res.status = 500;
+                                res.set_content(
+                                    R"({"error":"Could not rename room."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            res.set_content(
+                                json({{"message", "Room renamed successfully."},
+                                      {"name", newName}})
+                                    .dump(),
+                                "application/json");
+                        }
+                        catch (const std::exception &)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                R"({"error":"Invalid JSON request."})",
+                                "application/json");
+                        }
                     });
-                }
 
-                res.set_content(result.dump(), "application/json");
-            });
+        // Delete an empty room
+        server.Post("/api/rooms/delete",
+                    [&home](const httplib::Request &req,
+                            httplib::Response &res)
+                    {
+                        try
+                        {
+                            json body = json::parse(req.body);
+
+                            if (!body.contains("name") || !body["name"].is_string())
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"Room name is required."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            std::string name = body["name"].get<std::string>();
+
+                            if (!home.roomExists(name))
+                            {
+                                res.status = 404;
+                                res.set_content(
+                                    R"({"error":"Room not found."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (!home.deleteRoom(name))
+                            {
+                                res.status = 409;
+                                res.set_content(
+                                    R"({"error":"Room could not be deleted. Make sure it has no devices."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            res.set_content(
+                                json({{"message", "Room deleted successfully."}}).dump(),
+                                "application/json");
+                        }
+                        catch (const std::exception &)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                R"({"error":"Invalid JSON request."})",
+                                "application/json");
+                        }
+                    });
 
         // GET /api/devices
         server.Get("/api/devices",
-            [&home](const httplib::Request&, httplib::Response& res)
-            {
-                json result = json::array();
+                   [&home](const httplib::Request &, httplib::Response &res)
+                   {
+                       json result = json::array();
 
-                for (const DeviceRecord& device :
-                     home.getAllDeviceRecords())
-                {
-                    result.push_back({
-                        {"id", device.id},
-                        {"name", device.name},
-                        {"type", device.type},
-                        {"roomName", device.roomName},
-                        {"status", device.status == 1 ? "ON" : "OFF"},
-                        {"powerWatts", device.powerWatts},
-                        {"setting", device.setting},
-                        {"runtimeMinutes", device.runtimeMinutes},
-                        {"lifetime", device.lifetime},
-                        {"expiryTime", device.expiryTime}
-                    });
-                }
+                       for (const DeviceRecord &device :
+                            home.getAllDeviceRecords())
+                       {
+                           result.push_back({{"id", device.id},
+                                             {"name", device.name},
+                                             {"type", device.type},
+                                             {"roomName", device.roomName},
+                                             {"status", device.status == 1 ? "ON" : "OFF"},
+                                             {"powerWatts", device.powerWatts},
+                                             {"setting", device.setting},
+                                             {"runtimeMinutes", device.runtimeMinutes},
+                                             {"lifetime", device.lifetime},
+                                             {"expiryTime", device.expiryTime}});
+                       }
 
-                res.set_content(result.dump(), "application/json");
-            });
+                       res.set_content(result.dump(), "application/json");
+                   });
 
         // POST /api/devices/{id}/power
         // Request JSON: {"on": true} or {"on": false}
         server.Post(R"(/api/devices/([^/]+)/power)",
-            [&home](const httplib::Request& req, httplib::Response& res)
-            {
-                try
-                {
-                    const std::string deviceId = req.matches[1].str();
-
-                    if (!home.hasDevice(deviceId))
+                    [&home](const httplib::Request &req, httplib::Response &res)
                     {
-                        res.status = 404;
-                        res.set_content(
-                            R"({"error":"Device not found"})",
-                            "application/json");
-                        return;
-                    }
-
-                    const json body = json::parse(req.body);
-
-                    if (!body.contains("on") ||
-                        !body["on"].is_boolean())
-                    {
-                        res.status = 400;
-                        res.set_content(
-                            R"({"error":"Expected a boolean field named on"})",
-                            "application/json");
-                        return;
-                    }
-
-                    if (body["on"].get<bool>())
-                    {
-                        home.turnOn(deviceId);
-                    }
-                    else
-                    {
-                        home.turnOff(deviceId);
-                    }
-
-                    const auto records = home.getAllDeviceRecords();
-
-                    const auto it = std::find_if(
-                        records.begin(),
-                        records.end(),
-                        [&deviceId](const DeviceRecord& device)
+                        try
                         {
-                            return device.id == deviceId;
-                        });
+                            const std::string deviceId = req.matches[1].str();
 
-                    if (it == records.end())
-                    {
-                        res.status = 404;
-                        res.set_content(
-                            R"({"error":"Device no longer exists"})",
-                            "application/json");
-                        return;
-                    }
+                            if (!home.hasDevice(deviceId))
+                            {
+                                res.status = 404;
+                                res.set_content(
+                                    R"({"error":"Device not found"})",
+                                    "application/json");
+                                return;
+                            }
 
-                    json result = {
-                        {"id", it->id},
-                        {"name", it->name},
-                        {"roomName", it->roomName},
-                        {"status", it->status == 1 ? "ON" : "OFF"},
-                        {"powerWatts", it->powerWatts}
-                    };
+                            const json body = json::parse(req.body);
 
-                    res.set_content(result.dump(), "application/json");
-                }
-                catch (const json::exception& error)
-                {
-                    res.status = 400;
-                    res.set_content(
-                        json({{"error", error.what()}}).dump(),
-                        "application/json");
-                }
-                catch (const std::exception& error)
-                {
-                    res.status = 500;
-                    res.set_content(
-                        json({{"error", error.what()}}).dump(),
-                        "application/json");
-                }
-            });
+                            if (!body.contains("on") ||
+                                !body["on"].is_boolean())
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"Expected a boolean field named on"})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (body["on"].get<bool>())
+                            {
+                                home.turnOn(deviceId);
+                            }
+                            else
+                            {
+                                home.turnOff(deviceId);
+                            }
+
+                            const auto records = home.getAllDeviceRecords();
+
+                            const auto it = std::find_if(
+                                records.begin(),
+                                records.end(),
+                                [&deviceId](const DeviceRecord &device)
+                                {
+                                    return device.id == deviceId;
+                                });
+
+                            if (it == records.end())
+                            {
+                                res.status = 404;
+                                res.set_content(
+                                    R"({"error":"Device no longer exists"})",
+                                    "application/json");
+                                return;
+                            }
+
+                            json result = {
+                                {"id", it->id},
+                                {"name", it->name},
+                                {"roomName", it->roomName},
+                                {"status", it->status == 1 ? "ON" : "OFF"},
+                                {"powerWatts", it->powerWatts}};
+
+                            res.set_content(result.dump(), "application/json");
+                        }
+                        catch (const json::exception &error)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                json({{"error", error.what()}}).dump(),
+                                "application/json");
+                        }
+                        catch (const std::exception &error)
+                        {
+                            res.status = 500;
+                            res.set_content(
+                                json({{"error", error.what()}}).dump(),
+                                "application/json");
+                        }
+                    });
+
+        // GET /api/energy/sessions
+        // Returns saved and currently active energy sessions.
+        server.Get("/api/energy/sessions",
+                   [&home](const httplib::Request &, httplib::Response &res)
+                   {
+                       try
+                       {
+                           json result = json::array();
+
+                           for (const EnergySessionRecord &session :
+                                home.getEnergySessions())
+                           {
+                               result.push_back({{"id", session.id},
+                                                 {"deviceId", session.deviceId},
+                                                 {"deviceName", session.deviceName},
+                                                 {"roomName", session.roomName},
+                                                 {"powerWatts", session.powerWatts},
+                                                 {"startedAt", session.startedAt},
+                                                 {"endedAt", session.endedAt},
+                                                 {"active", session.endedAt == 0},
+                                                 {"energyKwh", session.energyKwh}});
+                           }
+
+                           res.set_content(result.dump(), "application/json");
+                       }
+                       catch (const std::exception &error)
+                       {
+                           res.status = 500;
+                           res.set_content(
+                               json({{"error", error.what()}}).dump(),
+                               "application/json");
+                       }
+                   });
 
         std::cout << "\nSmartHomeOS API is starting...\n";
         std::cout << "Rooms: " << home.getRoomCount() << '\n';
         std::cout << "Devices: " << home.getDeviceCount() << '\n';
+        std::cout << "Energy sessions: /api/energy/sessions\n";
         std::cout << "API address: http://localhost:8080\n";
         std::cout << "Press Ctrl+C to stop the server.\n\n";
 
@@ -171,7 +391,7 @@ int main()
             return 1;
         }
     }
-    catch (const std::exception& error)
+    catch (const std::exception &error)
     {
         std::cerr << "SmartHomeOS API error: "
                   << error.what() << '\n';

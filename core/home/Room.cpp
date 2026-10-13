@@ -49,6 +49,18 @@ bool Room::hasDevice(const std::string& deviceId) const
     ) != deviceIds.end();
 }
 
+
+bool Room::rename(const std::string& newName)
+{
+    if (newName.empty())
+    {
+        return false;
+    }
+
+    name = newName;
+    return true;
+}
+
 const std::vector<std::string>& Room::getDeviceIds() const
 {
     return deviceIds;

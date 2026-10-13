@@ -15,6 +15,7 @@ public:
     explicit Room(const std::string& roomName);
 
     std::string getName() const;
+    bool rename(const std::string& newName);
 
     void addDevice(const std::string& deviceId);
     void removeDevice(const std::string& deviceId);

@@ -697,3 +697,69 @@ bool SmartHome::hasDevice(const std::string& deviceId) const
 {
     return deviceManager.hasDevice(deviceId);
 }
+
+
+bool SmartHome::roomExists(const std::string& roomName) const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return findRoom(roomName) != nullptr;
+}
+
+bool SmartHome::renameRoom(
+    const std::string& oldName,
+    const std::string& newName)
+{
+    if (oldName.empty() || newName.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    Room* oldRoom = findRoom(oldName);
+
+    if (!oldRoom)
+        return false;
+
+    if (oldName == newName)
+        return true;
+
+    if (findRoom(newName))
+        return false;
+
+    if (!database.renameRoom(oldName, newName))
+        return false;
+
+    if (!oldRoom->rename(newName))
+        return false;
+
+    return true;
+}
+
+bool SmartHome::deleteRoom(const std::string& roomName)
+{
+    if (roomName.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    Room* room = findRoom(roomName);
+
+    if (!room || room->getDeviceCount() != 0)
+        return false;
+
+    if (!database.deleteRoom(roomName))
+        return false;
+
+    rooms.erase(
+        std::remove_if(
+            rooms.begin(),
+            rooms.end(),
+            [&roomName](const Room& item)
+            {
+                return item.getName() == roomName;
+            }
+        ),
+        rooms.end()
+    );
+
+    return true;
+}

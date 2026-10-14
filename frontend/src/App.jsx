@@ -70,6 +70,11 @@ function calculateBill(units, tariff) {
 
 function App() {
   const [rooms, setRooms] = useState([]);
+  const [roomNameInput, setRoomNameInput] = useState("");
+  const [editingRoom, setEditingRoom] = useState(null);
+  const [editingRoomName, setEditingRoomName] = useState("");
+  const [roomBusy, setRoomBusy] = useState(false);
+  const [roomMessage, setRoomMessage] = useState("");
   const [devices, setDevices] = useState([]);
   const [sessions, setSessions] = useState([]);
 
@@ -82,6 +87,22 @@ function App() {
   const [selectedRoom, setSelectedRoom] = useState("All Rooms");
   const [updatingDevices, setUpdatingDevices] = useState({});
   const [bulkUpdating, setBulkUpdating] = useState(false);
+
+  const [showDeviceForm, setShowDeviceForm] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [deviceMessage, setDeviceMessage] = useState("");
+  const [deletingDevices, setDeletingDevices] = useState({});
+
+  const [deviceForm, setDeviceForm] = useState({
+    id: "",
+    name: "",
+    type: "Light",
+    roomName: "",
+    powerWatts: "60",
+    temporary: true,
+    lifetimeValue: "30",
+    lifetimeUnit: "minutes",
+  });
 
   const [tariff, setTariff] = useState(DEFAULT_TARIFF);
 
@@ -121,6 +142,110 @@ function App() {
       setLoading(false);
     }
   }, []);
+
+
+  const getApiError = async (response) => {
+    try {
+      const data = await response.json();
+      return data.error || data.message || `Request failed (${response.status})`;
+    } catch {
+      return `Request failed (${response.status})`;
+    }
+  };
+
+  const manageRoom = async (endpoint, payload, successMessage) => {
+    setRoomBusy(true);
+    setRoomMessage("");
+    setError("");
+
+    try {
+      const response = await fetch(`${API_URL}/rooms${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(await getApiError(response));
+      }
+
+      setRoomMessage(successMessage);
+      await loadDashboard(false);
+      return true;
+    } catch (err) {
+      setRoomMessage(`Error: ${err.message}`);
+      return false;
+    } finally {
+      setRoomBusy(false);
+    }
+  };
+
+  const createRoom = async (event) => {
+    event.preventDefault();
+
+    const name = roomNameInput.trim();
+    if (!name) {
+      setRoomMessage("Enter a room name.");
+      return;
+    }
+
+    const success = await manageRoom(
+      "",
+      { name },
+      `Room "${name}" created successfully.`
+    );
+
+    if (success) {
+      setRoomNameInput("");
+    }
+  };
+
+  const renameRoom = async (event) => {
+    event.preventDefault();
+
+    if (!editingRoom) return;
+
+    const oldName = editingRoom;
+    const newName = editingRoomName.trim();
+
+    if (!newName) {
+      setRoomMessage("Enter a new room name.");
+      return;
+    }
+
+    const success = await manageRoom(
+      "/rename",
+      { oldName, newName },
+      `Room renamed to "${newName}".`
+    );
+
+    if (success) {
+      setEditingRoom(null);
+      setEditingRoomName("");
+
+      setSelectedRoom((current) =>
+        current === oldName ? newName : current
+      );
+    }
+  };
+
+  const deleteRoom = async (name) => {
+    const confirmed = window.confirm(
+      `Delete "${name}"? Only empty rooms can be deleted.`
+    );
+
+    if (!confirmed) return;
+
+    const success = await manageRoom(
+      "/delete",
+      { name },
+      `Room "${name}" deleted successfully.`
+    );
+
+    if (success && selectedRoom === name) {
+      setSelectedRoom("All Rooms");
+    }
+  };
 
   const loadEnergySessions = useCallback(async () => {
     try {
@@ -262,6 +387,52 @@ function App() {
       setError(`Could not update ${getDeviceName(device)}: ${err.message}`);
     } finally {
       setUpdatingDevices((current) => ({ ...current, [id]: false }));
+    }
+  };
+
+  const deleteDevice = async (device) => {
+    const id = getDeviceId(device);
+    const name = getDeviceName(device);
+
+    if (!id) {
+      setDeviceMessage("Error: This device does not have a valid ID.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${name}" permanently? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    setDeletingDevices((current) => ({
+      ...current,
+      [id]: true,
+    }));
+    setDeviceMessage("");
+    setError("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/devices/${encodeURIComponent(id)}`,
+        { method: "DELETE" }
+      );
+
+      if (!response.ok) {
+        throw new Error(await getApiError(response));
+      }
+
+      setDeviceMessage(`"${name}" deleted successfully.`);
+
+      await loadDashboard(false);
+      await loadEnergySessions();
+    } catch (err) {
+      setDeviceMessage(`Error: Could not delete "${name}": ${err.message}`);
+    } finally {
+      setDeletingDevices((current) => ({
+        ...current,
+        [id]: false,
+      }));
     }
   };
 
@@ -521,6 +692,195 @@ function App() {
               {statCard("Rooms", rooms.length, "Configured rooms")}
             </div>
 
+
+            <section style={styles.panel}>
+              <h2 style={styles.sectionTitle}>Room Management</h2>
+
+              <p style={styles.muted}>
+                Create rooms, rename existing rooms, or remove rooms that have no devices.
+              </p>
+
+              <form
+                onSubmit={createRoom}
+                style={{
+                  display: "flex",
+                  gap: "10px",
+                  flexWrap: "wrap",
+                  marginBottom: "18px",
+                }}
+              >
+                <input
+                  style={{ ...styles.input, flex: "1 1 220px" }}
+                  placeholder="Enter new room name"
+                  value={roomNameInput}
+                  onChange={(event) => setRoomNameInput(event.target.value)}
+                  maxLength={60}
+                  disabled={roomBusy}
+                />
+
+                <button
+                  type="submit"
+                  style={styles.primaryButton}
+                  disabled={roomBusy}
+                >
+                  {roomBusy ? "Please wait..." : "＋ Add Room"}
+                </button>
+              </form>
+
+              {roomMessage && (
+                <p
+                  role="status"
+                  style={{
+                    color: roomMessage.startsWith("Error:")
+                      ? "#fca5a5"
+                      : "#4ade80",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {roomMessage}
+                </p>
+              )}
+
+              {rooms.length === 0 ? (
+                <p style={styles.muted}>No rooms configured yet.</p>
+              ) : (
+                <div style={styles.grid}>
+                  {rooms.map((room) => {
+                    const name =
+                      typeof room === "string"
+                        ? room
+                        : room.name ?? room.roomName;
+
+                    if (!name) return null;
+
+                    const count = devices.filter(
+                      (device) => getRoomName(device) === name
+                    ).length;
+
+                    const isEditing = editingRoom === name;
+
+                    return (
+                      <div
+                        key={name}
+                        style={{
+                          ...styles.panel,
+                          marginBottom: 0,
+                        }}
+                      >
+                        {isEditing ? (
+                          <form onSubmit={renameRoom}>
+                            <label
+                              style={{
+                                display: "block",
+                                marginBottom: "8px",
+                              }}
+                            >
+                              New room name
+                            </label>
+
+                            <input
+                              style={styles.input}
+                              value={editingRoomName}
+                              onChange={(event) =>
+                                setEditingRoomName(event.target.value)
+                              }
+                              maxLength={60}
+                              autoFocus
+                              disabled={roomBusy}
+                            />
+
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "8px",
+                                flexWrap: "wrap",
+                                marginTop: "12px",
+                              }}
+                            >
+                              <button
+                                type="submit"
+                                style={styles.primaryButton}
+                                disabled={roomBusy}
+                              >
+                                Save
+                              </button>
+
+                              <button
+                                type="button"
+                                style={styles.button}
+                                disabled={roomBusy}
+                                onClick={() => {
+                                  setEditingRoom(null);
+                                  setEditingRoomName("");
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </form>
+                        ) : (
+                          <>
+                            <h3 style={{ marginTop: 0, overflowWrap: "anywhere" }}>
+                              {name}
+                            </h3>
+
+                            <p style={styles.muted}>
+                              {count} {count === 1 ? "device" : "devices"}
+                            </p>
+
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "8px",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <button
+                                type="button"
+                                style={styles.button}
+                                disabled={roomBusy}
+                                onClick={() => {
+                                  setEditingRoom(name);
+                                  setEditingRoomName(name);
+                                  setRoomMessage("");
+                                }}
+                              >
+                                Rename
+                              </button>
+
+                              <button
+                                type="button"
+                                style={{
+                                  ...styles.button,
+                                  borderColor: "#ef4444",
+                                  color: "#fca5a5",
+                                }}
+                                disabled={roomBusy || count > 0}
+                                title={
+                                  count > 0
+                                    ? "Remove all devices from this room first."
+                                    : "Delete this empty room"
+                                }
+                                onClick={() => deleteRoom(name)}
+                              >
+                                Delete
+                              </button>
+                            </div>
+
+                            {count > 0 && (
+                              <p style={{ ...styles.muted, fontSize: "12px" }}>
+                                Remove this room's devices before deleting it.
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
             <section style={styles.panel}>
               <h2 style={styles.sectionTitle}>Energy Monitor</h2>
 
@@ -769,6 +1129,156 @@ function App() {
             <section style={styles.panel}>
               <h2 style={styles.sectionTitle}>Rooms and Devices</h2>
 
+              <button
+                style={styles.button}
+                onClick={() => {
+                  setShowDeviceForm((current) => !current);
+                  setDeviceMessage("");
+                }}
+              >
+                {showDeviceForm ? "Cancel" : "+ Add Device"}
+              </button>
+
+              {showDeviceForm && (
+                <div style={{ ...styles.panel, marginTop: "16px" }}>
+                  <h3>Add a New Device</h3>
+
+                  <form
+                    onSubmit={handleAddDevice}
+                    style={{
+                      display: "grid",
+                      gap: "12px",
+                      maxWidth: "500px",
+                    }}
+                  >
+                    <input
+                      placeholder="Device ID (e.g. BEDROOM_LIGHT_02)"
+                      value={deviceForm.id}
+                      onChange={(e) =>
+                        setDeviceForm({ ...deviceForm, id: e.target.value })
+                      }
+                      required
+                    />
+
+                    <input
+                      placeholder="Device Name (e.g. Bedroom Light)"
+                      value={deviceForm.name}
+                      onChange={(e) =>
+                        setDeviceForm({ ...deviceForm, name: e.target.value })
+                      }
+                      required
+                    />
+
+                    <label>
+                      Device Type
+                      <select
+                        value={deviceForm.type}
+                        onChange={(e) =>
+                          setDeviceForm({ ...deviceForm, type: e.target.value })
+                        }
+                      >
+                        <option value="Light">Light</option>
+                        <option value="Fan">Fan</option>
+                        <option value="AC">AC</option>
+                        <option value="Heater">Heater</option>
+                        <option value="Other">Other</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Room
+                      <select
+                        value={deviceForm.roomName}
+                        onChange={(e) =>
+                          setDeviceForm({ ...deviceForm, roomName: e.target.value })
+                        }
+                        required
+                      >
+                        <option value="">Select a room</option>
+                        {rooms.map((room) => {
+                          const name =
+                            typeof room === "string"
+                              ? room
+                              : room.name || room.roomName;
+
+                          return name ? (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ) : null;
+                        })}
+                      </select>
+                    </label>
+
+                    <label>
+                      Power Consumption (Watts)
+                      <input
+                        type="number"
+                        min="1"
+                        value={deviceForm.powerWatts}
+                        onChange={(e) =>
+                          setDeviceForm({
+                            ...deviceForm,
+                            powerWatts: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={deviceForm.temporary}
+                        onChange={(e) =>
+                          setDeviceForm({
+                            ...deviceForm,
+                            temporary: e.target.checked,
+                          })
+                        }
+                      />
+                      Temporary device
+                    </label>
+
+                    {deviceForm.temporary && (
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <input
+                          type="number"
+                          min="1"
+                          value={deviceForm.lifetimeValue}
+                          onChange={(e) =>
+                            setDeviceForm({
+                              ...deviceForm,
+                              lifetimeValue: e.target.value,
+                            })
+                          }
+                          required
+                        />
+
+                        <select
+                          value={deviceForm.lifetimeUnit}
+                          onChange={(e) =>
+                            setDeviceForm({
+                              ...deviceForm,
+                              lifetimeUnit: e.target.value,
+                            })
+                          }
+                        >
+                          <option value="minutes">Minutes</option>
+                          <option value="hours">Hours</option>
+                        </select>
+                      </div>
+                    )}
+
+                    <button type="submit" style={styles.button} disabled={deviceBusy}>
+                      {deviceBusy ? "Adding..." : "Add Device"}
+                    </button>
+
+                    {deviceMessage && <p>{deviceMessage}</p>}
+                  </form>
+                </div>
+              )}
+
               <div
                 style={{
                   display: "grid",
@@ -902,6 +1412,20 @@ function App() {
                               disabled={busy}
                               onClick={() => updateDevicePower(device, !on)}
                             >
+
+                              <button
+                                style={{
+                                  ...styles.button,
+                                  background: "#7f1d1d",
+                                  marginTop: "8px",
+                                  width: "100%",
+                                }}
+                                disabled={busy || Boolean(deletingDevices[id])}
+                                onClick={() => deleteDevice(device)}
+                              >
+                                {deletingDevices[id] ? "Deleting..." : "Delete Device"}
+                              </button>
+
                               {busy
                                 ? "Updating..."
                                 : on
@@ -954,15 +1478,15 @@ function App() {
 
                           const durationSeconds = active
                             ? Math.max(
-                                0,
-                                Math.floor(Date.now() / 1000) -
-                                  Number(session.startedAt || 0)
-                              )
+                              0,
+                              Math.floor(Date.now() / 1000) -
+                              Number(session.startedAt || 0)
+                            )
                             : Math.max(
-                                0,
-                                Number(session.endedAt || 0) -
-                                  Number(session.startedAt || 0)
-                              );
+                              0,
+                              Number(session.endedAt || 0) -
+                              Number(session.startedAt || 0)
+                            );
 
                           return (
                             <tr

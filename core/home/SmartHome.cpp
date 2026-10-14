@@ -11,10 +11,11 @@
 #include "../devices/Fan.h"
 #include "../devices/AC.h"
 #include "../devices/Heater.h"
+#include "../devices/GenericAppliance.h"
 
 namespace
 {
-    DeviceRecord makeDeviceRecord(const Appliance& device)
+    DeviceRecord makeDeviceRecord(const Appliance &device)
     {
         DeviceRecord record;
 
@@ -38,20 +39,24 @@ namespace
     }
 
     std::unique_ptr<Appliance> createRestoredDevice(
-        const DeviceRecord& record)
+        const DeviceRecord &record)
     {
         std::unique_ptr<Appliance> device;
 
         if (record.type == "Light")
         {
             device = std::make_unique<Light>(
-                record.id, record.name, record.roomName,
+                record.id,
+                record.name,
+                record.roomName,
                 record.powerWatts);
         }
         else if (record.type == "Fan")
         {
             auto fan = std::make_unique<Fan>(
-                record.id, record.name, record.roomName,
+                record.id,
+                record.name,
+                record.roomName,
                 record.powerWatts);
 
             fan->setSpeed(record.setting);
@@ -60,7 +65,9 @@ namespace
         else if (record.type == "AC")
         {
             auto ac = std::make_unique<AC>(
-                record.id, record.name, record.roomName,
+                record.id,
+                record.name,
+                record.roomName,
                 record.powerWatts);
 
             ac->setTemperature(record.setting);
@@ -69,7 +76,9 @@ namespace
         else if (record.type == "Heater")
         {
             auto heater = std::make_unique<Heater>(
-                record.id, record.name, record.roomName,
+                record.id,
+                record.name,
+                record.roomName,
                 record.powerWatts);
 
             heater->setTemperature(record.setting);
@@ -77,9 +86,13 @@ namespace
         }
         else
         {
-            std::cerr << "Unsupported saved device type: "
-                      << record.type << '\n';
-            return nullptr;
+            // Restore any other saved device type generically.
+            device = std::make_unique<GenericAppliance>(
+                record.id,
+                record.name,
+                record.roomName,
+                record.powerWatts,
+                record.type);
         }
 
         device->restoreState(
@@ -90,9 +103,10 @@ namespace
 
         return device;
     }
+
 }
 
-SmartHome::SmartHome(const std::string& name)
+SmartHome::SmartHome(const std::string &name)
     : homeName(name),
       database("smarthome.db"),
       energyTracker(database.getConnection()),
@@ -118,13 +132,13 @@ SmartHome::SmartHome(const std::string& name)
     }
 
     // Restore saved rooms first.
-    for (const std::string& roomName : database.loadRooms())
+    for (const std::string &roomName : database.loadRooms())
     {
         rooms.emplace_back(roomName);
     }
 
     deviceManager.setExpiryCallback(
-        [this](const std::string& deviceId)
+        [this](const std::string &deviceId)
         {
             handleExpiredDevice(deviceId);
         });
@@ -132,7 +146,7 @@ SmartHome::SmartHome(const std::string& name)
     const std::time_t now = std::time(nullptr);
 
     // Restore saved devices from SQLite.
-    for (const DeviceRecord& record : database.loadDevices())
+    for (const DeviceRecord &record : database.loadDevices())
     {
         // Remove temporary devices that expired while the app was closed.
         if (record.lifetime ==
@@ -163,7 +177,7 @@ SmartHome::SmartHome(const std::string& name)
 
         try
         {
-            Room* room = findRoom(record.roomName);
+            Room *room = findRoom(record.roomName);
 
             if (room == nullptr)
             {
@@ -215,9 +229,9 @@ SmartHome::SmartHome(const std::string& name)
                 }
             }
         }
-        catch (const std::exception& error)
+        catch (const std::exception &error)
         {
-            if (Room* existingRoom = findRoom(record.roomName))
+            if (Room *existingRoom = findRoom(record.roomName))
             {
                 existingRoom->removeDevice(record.id);
             }
@@ -241,9 +255,9 @@ SmartHome::~SmartHome()
     deviceManager.stopExpiryWorker();
 }
 
-Room* SmartHome::findRoom(const std::string& roomName)
+Room *SmartHome::findRoom(const std::string &roomName)
 {
-    for (Room& room : rooms)
+    for (Room &room : rooms)
     {
         if (room.getName() == roomName)
         {
@@ -254,10 +268,10 @@ Room* SmartHome::findRoom(const std::string& roomName)
     return nullptr;
 }
 
-const Room* SmartHome::findRoom(
-    const std::string& roomName) const
+const Room *SmartHome::findRoom(
+    const std::string &roomName) const
 {
-    for (const Room& room : rooms)
+    for (const Room &room : rooms)
     {
         if (room.getName() == roomName)
         {
@@ -268,7 +282,7 @@ const Room* SmartHome::findRoom(
     return nullptr;
 }
 
-bool SmartHome::addRoom(const std::string& roomName)
+bool SmartHome::addRoom(const std::string &roomName)
 {
     if (roomName.empty())
     {
@@ -294,7 +308,7 @@ bool SmartHome::addRoom(const std::string& roomName)
     return true;
 }
 
-void SmartHome::addDevice(Appliance* device)
+void SmartHome::addDevice(Appliance *device)
 {
     if (device == nullptr)
     {
@@ -346,7 +360,7 @@ void SmartHome::addDevice(Appliance* device)
 
             std::lock_guard<std::mutex> lock(homeMutex);
 
-            if (Room* room = findRoom(roomName))
+            if (Room *room = findRoom(roomName))
             {
                 room->removeDevice(deviceId);
             }
@@ -359,7 +373,7 @@ void SmartHome::addDevice(Appliance* device)
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        if (Room* room = findRoom(roomName))
+        if (Room *room = findRoom(roomName))
         {
             room->removeDevice(deviceId);
         }
@@ -368,7 +382,7 @@ void SmartHome::addDevice(Appliance* device)
         {
             auto it = std::find_if(
                 rooms.begin(), rooms.end(),
-                [&roomName](const Room& room)
+                [&roomName](const Room &room)
                 {
                     return room.getName() == roomName;
                 });
@@ -388,7 +402,7 @@ void SmartHome::addDevice(Appliance* device)
 }
 
 void SmartHome::addTemporaryDevice(
-    Appliance* device, int lifetimeSeconds)
+    Appliance *device, int lifetimeSeconds)
 {
     if (device == nullptr)
     {
@@ -450,7 +464,7 @@ void SmartHome::addTemporaryDevice(
 
             std::lock_guard<std::mutex> lock(homeMutex);
 
-            if (Room* room = findRoom(roomName))
+            if (Room *room = findRoom(roomName))
             {
                 room->removeDevice(deviceId);
             }
@@ -463,7 +477,7 @@ void SmartHome::addTemporaryDevice(
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        if (Room* room = findRoom(roomName))
+        if (Room *room = findRoom(roomName))
         {
             room->removeDevice(deviceId);
         }
@@ -472,7 +486,7 @@ void SmartHome::addTemporaryDevice(
         {
             auto it = std::find_if(
                 rooms.begin(), rooms.end(),
-                [&roomName](const Room& room)
+                [&roomName](const Room &room)
                 {
                     return room.getName() == roomName;
                 });
@@ -491,7 +505,7 @@ void SmartHome::addTemporaryDevice(
               << deviceId << '\n';
 }
 
-bool SmartHome::removeDevice(const std::string& deviceId)
+bool SmartHome::removeDevice(const std::string &deviceId)
 {
     // Close the active energy session before removing the device.
     if (deviceManager.hasDevice(deviceId))
@@ -512,7 +526,7 @@ bool SmartHome::removeDevice(const std::string& deviceId)
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        for (Room& room : rooms)
+        for (Room &room : rooms)
         {
             room.removeDevice(deviceId);
         }
@@ -526,7 +540,7 @@ bool SmartHome::removeDevice(const std::string& deviceId)
     return true;
 }
 
-void SmartHome::turnOn(const std::string& deviceId)
+void SmartHome::turnOn(const std::string &deviceId)
 {
     deviceManager.turnOn(deviceId);
 
@@ -555,7 +569,7 @@ void SmartHome::turnOn(const std::string& deviceId)
     }
 }
 
-void SmartHome::turnOff(const std::string& deviceId)
+void SmartHome::turnOff(const std::string &deviceId)
 {
     deviceManager.turnOff(deviceId);
 
@@ -587,7 +601,7 @@ void SmartHome::showRooms()
 
     std::cout << "\nRooms in " << homeName << ":\n";
 
-    for (const Room& room : rooms)
+    for (const Room &room : rooms)
     {
         std::cout << "- " << room.getName()
                   << " (" << room.getDeviceCount()
@@ -595,11 +609,11 @@ void SmartHome::showRooms()
     }
 }
 
-void SmartHome::showRoomDevices(const std::string& roomName)
+void SmartHome::showRoomDevices(const std::string &roomName)
 {
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    const Room* room = findRoom(roomName);
+    const Room *room = findRoom(roomName);
 
     if (room == nullptr)
     {
@@ -610,7 +624,7 @@ void SmartHome::showRoomDevices(const std::string& roomName)
 
     std::cout << "\nDevices in " << roomName << ":\n";
 
-    for (const std::string& id : room->getDeviceIds())
+    for (const std::string &id : room->getDeviceIds())
     {
         if (!deviceManager.showDeviceStatus(id))
         {
@@ -647,7 +661,7 @@ std::vector<EnergySessionRecord> SmartHome::getEnergySessions() const
 }
 
 void SmartHome::handleExpiredDevice(
-    const std::string& deviceId)
+    const std::string &deviceId)
 {
     // Close the session before deleting an expired temporary device.
     if (!energyTracker.endSession(deviceId))
@@ -660,7 +674,7 @@ void SmartHome::handleExpiredDevice(
     {
         std::lock_guard<std::mutex> lock(homeMutex);
 
-        for (Room& room : rooms)
+        for (Room &room : rooms)
         {
             room.removeDevice(deviceId);
         }
@@ -672,7 +686,6 @@ void SmartHome::handleExpiredDevice(
               << deviceId << '\n';
 }
 
-
 std::vector<std::string> SmartHome::getRoomNames() const
 {
     std::lock_guard<std::mutex> lock(homeMutex);
@@ -680,7 +693,7 @@ std::vector<std::string> SmartHome::getRoomNames() const
     std::vector<std::string> names;
     names.reserve(rooms.size());
 
-    for (const Room& room : rooms)
+    for (const Room &room : rooms)
     {
         names.push_back(room.getName());
     }
@@ -693,28 +706,27 @@ std::vector<DeviceRecord> SmartHome::getAllDeviceRecords() const
     return deviceManager.getAllDeviceRecords();
 }
 
-bool SmartHome::hasDevice(const std::string& deviceId) const
+bool SmartHome::hasDevice(const std::string &deviceId) const
 {
     return deviceManager.hasDevice(deviceId);
 }
 
-
-bool SmartHome::roomExists(const std::string& roomName) const
+bool SmartHome::roomExists(const std::string &roomName) const
 {
     std::lock_guard<std::mutex> lock(homeMutex);
     return findRoom(roomName) != nullptr;
 }
 
 bool SmartHome::renameRoom(
-    const std::string& oldName,
-    const std::string& newName)
+    const std::string &oldName,
+    const std::string &newName)
 {
     if (oldName.empty() || newName.empty())
         return false;
 
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    Room* oldRoom = findRoom(oldName);
+    Room *oldRoom = findRoom(oldName);
 
     if (!oldRoom)
         return false;
@@ -734,14 +746,14 @@ bool SmartHome::renameRoom(
     return true;
 }
 
-bool SmartHome::deleteRoom(const std::string& roomName)
+bool SmartHome::deleteRoom(const std::string &roomName)
 {
     if (roomName.empty())
         return false;
 
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    Room* room = findRoom(roomName);
+    Room *room = findRoom(roomName);
 
     if (!room || room->getDeviceCount() != 0)
         return false;
@@ -753,13 +765,11 @@ bool SmartHome::deleteRoom(const std::string& roomName)
         std::remove_if(
             rooms.begin(),
             rooms.end(),
-            [&roomName](const Room& item)
+            [&roomName](const Room &item)
             {
                 return item.getName() == roomName;
-            }
-        ),
-        rooms.end()
-    );
+            }),
+        rooms.end());
 
     return true;
 }

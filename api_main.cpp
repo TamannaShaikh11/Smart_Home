@@ -8,6 +8,12 @@
 #include "third_party/httplib.h"
 #include "third_party/json.hpp"
 
+#include "core/devices/GenericAppliance.h"
+#include "core/devices/Light.h"
+#include "core/devices/Fan.h"
+#include "core/devices/AC.h"
+#include "core/devices/Heater.h"
+
 using json = nlohmann::json;
 
 int main()
@@ -237,6 +243,191 @@ int main()
                         }
                     });
 
+        // POST /api/devices
+        // Permanent device example:
+        // {
+        //   "id": "AIR_PURIFIER_01",
+        //   "name": "Air Purifier",
+        //   "type": "Air Purifier",
+        //   "roomName": "Living Room",
+        //   "powerWatts": 45,
+        //   "temporary": true,
+        //   "lifetimeSeconds": 1800
+        // }
+        //
+        // lifetimeSeconds = 0 means manual removal only.
+        server.Post("/api/devices",
+                    [&home](const httplib::Request &req, httplib::Response &res)
+                    {
+                        try
+                        {
+                            const json body = json::parse(req.body);
+
+                            auto fail = [&res](int status, const std::string &message)
+                            {
+                                res.status = status;
+                                res.set_content(
+                                    json({{"error", message}}).dump(),
+                                    "application/json");
+                            };
+
+                            if (!body.contains("id") || !body["id"].is_string() ||
+                                !body.contains("name") || !body["name"].is_string() ||
+                                !body.contains("type") || !body["type"].is_string() ||
+                                !body.contains("roomName") || !body["roomName"].is_string() ||
+                                !body.contains("powerWatts") || !body["powerWatts"].is_number_integer())
+                            {
+                                fail(400, "Required fields: id, name, type, roomName, powerWatts.");
+                                return;
+                            }
+
+                            const std::string id = body["id"].get<std::string>();
+                            const std::string name = body["name"].get<std::string>();
+                            const std::string type = body["type"].get<std::string>();
+                            const std::string roomName = body["roomName"].get<std::string>();
+                            const int powerWatts = body["powerWatts"].get<int>();
+
+                            auto isBlank = [](const std::string &value)
+                            {
+                                return value.find_first_not_of(" \t\n\r") == std::string::npos;
+                            };
+
+                            if (isBlank(id) || isBlank(name) ||
+                                isBlank(type) || isBlank(roomName))
+                            {
+                                fail(400, "ID, name, type, and room name cannot be empty.");
+                                return;
+                            }
+
+                            if (powerWatts < 0)
+                            {
+                                fail(400, "Power consumption cannot be negative.");
+                                return;
+                            }
+
+                            if (home.hasDevice(id))
+                            {
+                                fail(409, "A device with this ID already exists.");
+                                return;
+                            }
+
+                            bool temporary = false;
+                            int lifetimeSeconds = 0;
+
+                            if (body.contains("temporary"))
+                            {
+                                if (!body["temporary"].is_boolean())
+                                {
+                                    fail(400, "temporary must be a boolean.");
+                                    return;
+                                }
+
+                                temporary = body["temporary"].get<bool>();
+                            }
+
+                            if (body.contains("lifetimeSeconds"))
+                            {
+                                if (!body["lifetimeSeconds"].is_number_integer())
+                                {
+                                    fail(400, "lifetimeSeconds must be an integer.");
+                                    return;
+                                }
+
+                                lifetimeSeconds = body["lifetimeSeconds"].get<int>();
+                            }
+
+                            if (lifetimeSeconds < 0)
+                            {
+                                fail(400, "lifetimeSeconds cannot be negative.");
+                                return;
+                            }
+
+                            if (!temporary && lifetimeSeconds != 0)
+                            {
+                                fail(400, "Set temporary to true to specify a lifetime.");
+                                return;
+                            }
+
+                            std::unique_ptr<Appliance> device;
+
+                            if (type == "Light")
+                            {
+                                device = std::make_unique<Light>(
+                                    id, name, roomName, powerWatts);
+                            }
+                            else if (type == "Fan")
+                            {
+                                device = std::make_unique<Fan>(
+                                    id, name, roomName, powerWatts);
+                            }
+                            else if (type == "AC")
+                            {
+                                device = std::make_unique<AC>(
+                                    id, name, roomName, powerWatts);
+                            }
+                            else if (type == "Heater")
+                            {
+                                device = std::make_unique<Heater>(
+                                    id, name, roomName, powerWatts);
+                            }
+                            else
+                            {
+                                device = std::make_unique<GenericAppliance>(
+                                    id, name, roomName, powerWatts, type);
+                            }
+
+                            if (temporary)
+                            {
+                                home.addTemporaryDevice(device.get(), lifetimeSeconds);
+                            }
+                            else
+                            {
+                                home.addDevice(device.get());
+                            }
+
+                            // Ownership transfers to SmartHome after successful addition.
+                            device.release();
+
+                            DeviceRecord created;
+                            for (const DeviceRecord &record : home.getAllDeviceRecords())
+                            {
+                                if (record.id == id)
+                                {
+                                    created = record;
+                                    break;
+                                }
+                            }
+
+                            res.status = 201;
+                            res.set_content(
+                                json({{"message", "Device created successfully."},
+                                      {"id", created.id},
+                                      {"name", created.name},
+                                      {"type", created.type},
+                                      {"roomName", created.roomName},
+                                      {"powerWatts", created.powerWatts},
+                                      {"status", created.status == 1 ? "ON" : "OFF"},
+                                      {"lifetime", created.lifetime},
+                                      {"expiryTime", created.expiryTime}})
+                                    .dump(),
+                                "application/json");
+                        }
+                        catch (const json::exception &error)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                json({{"error", error.what()}}).dump(),
+                                "application/json");
+                        }
+                        catch (const std::exception &error)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                json({{"error", error.what()}}).dump(),
+                                "application/json");
+                        }
+                    });
+
         // GET /api/devices
         server.Get("/api/devices",
                    [&home](const httplib::Request &, httplib::Response &res)
@@ -260,6 +451,37 @@ int main()
 
                        res.set_content(result.dump(), "application/json");
                    });
+
+        // DELETE /api/devices/{id}
+        server.Delete(R"(/api/devices/([^/]+))",
+                      [&home](const httplib::Request &req, httplib::Response &res)
+                      {
+                          const std::string deviceId = req.matches[1].str();
+
+                          if (!home.hasDevice(deviceId))
+                          {
+                              res.status = 404;
+                              res.set_content(
+                                  R"({"error":"Device not found."})",
+                                  "application/json");
+                              return;
+                          }
+
+                          if (!home.removeDevice(deviceId))
+                          {
+                              res.status = 500;
+                              res.set_content(
+                                  R"({"error":"Could not remove device."})",
+                                  "application/json");
+                              return;
+                          }
+
+                          res.set_content(
+                              json({{"message", "Device removed successfully."},
+                                    {"id", deviceId}})
+                                  .dump(),
+                              "application/json");
+                      });
 
         // POST /api/devices/{id}/power
         // Request JSON: {"on": true} or {"on": false}

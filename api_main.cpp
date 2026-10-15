@@ -28,8 +28,7 @@ int main()
         // Allow requests from the React/Vite development server.
         server.set_default_headers({{"Access-Control-Allow-Origin", "http://localhost:5173"},
                                     {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
-                                    {"Access-Control-Allow-Headers", "Content-Type"}
-                                });
+                                    {"Access-Control-Allow-Headers", "Content-Type"}});
 
         // Handle browser CORS preflight requests.
         server.Options(R"(/api/.*)",
@@ -377,17 +376,18 @@ int main()
                                     id, name, roomName, powerWatts, type);
                             }
 
+                            // Transfer ownership before calling SmartHome.
+                            // SmartHome must clean up the device if registration fails.
+                            Appliance *rawDevice = device.release();
+
                             if (temporary)
                             {
-                                home.addTemporaryDevice(device.get(), lifetimeSeconds);
+                                home.addTemporaryDevice(rawDevice, lifetimeSeconds);
                             }
                             else
                             {
-                                home.addDevice(device.get());
+                                home.addDevice(rawDevice);
                             }
-
-                            // Ownership transfers to SmartHome after successful addition.
-                            device.release();
 
                             DeviceRecord created;
                             for (const DeviceRecord &record : home.getAllDeviceRecords())

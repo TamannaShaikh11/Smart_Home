@@ -230,7 +230,7 @@ SmartHome::SmartHome(const std::string &name)
             }
         }
         catch (const std::exception &error)
-        {
+        {   
             if (Room *existingRoom = findRoom(record.roomName))
             {
                 existingRoom->removeDevice(record.id);
@@ -348,10 +348,12 @@ void SmartHome::addDevice(Appliance *device)
         findRoom(roomName)->addDevice(deviceId);
     }
 
+    bool registered = false;
+
     try
     {
         deviceManager.addDevice(device);
-
+        registered = true;
         DeviceRecord record = makeDeviceRecord(*device);
 
         if (!database.saveDevice(record))
@@ -371,6 +373,20 @@ void SmartHome::addDevice(Appliance *device)
     }
     catch (...)
     {
+        if (registered)
+        {
+            // Remove it only if DeviceManager still owns it.
+            // removeDevice() deletes the registered device.
+            if (deviceManager.hasDevice(deviceId))
+            {
+                deviceManager.removeDevice(deviceId);
+            }
+        }
+        else
+        {
+            // Registration failed before DeviceManager accepted ownership.
+            delete device;
+        }
         std::lock_guard<std::mutex> lock(homeMutex);
 
         if (Room *room = findRoom(roomName))
@@ -451,11 +467,13 @@ void SmartHome::addTemporaryDevice(
         findRoom(roomName)->addDevice(deviceId);
     }
 
+    bool registered = false;
+
     try
     {
         deviceManager.addTemporaryDevice(
             device, lifetimeSeconds);
-
+        registered = true;
         DeviceRecord record = makeDeviceRecord(*device);
 
         if (!database.saveDevice(record))
@@ -475,6 +493,21 @@ void SmartHome::addTemporaryDevice(
     }
     catch (...)
     {
+        if (registered)
+        {
+            // Remove it only if DeviceManager still owns it.
+            // removeDevice() deletes the registered device.
+            if (deviceManager.hasDevice(deviceId))
+            {
+                deviceManager.removeDevice(deviceId);
+            }
+        }
+        else
+        {
+            // Registration failed before DeviceManager accepted ownership.
+            delete device;
+        }
+
         std::lock_guard<std::mutex> lock(homeMutex);
 
         if (Room *room = findRoom(roomName))

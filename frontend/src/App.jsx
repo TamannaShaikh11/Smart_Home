@@ -1,4 +1,6 @@
 
+import "./App.css";
+
 import React, {
   useCallback,
   useEffect,
@@ -111,6 +113,7 @@ function App() {
   });
 
   const [showTariffSettings, setShowTariffSettings] = useState(false);
+  const [activeSection, setActiveSection] = useState("overview");
 
   const fetchJson = async (url, options = {}) => {
     const response = await fetch(url, options);
@@ -594,1046 +597,217 @@ function App() {
     setTariffInputs({ ...DEFAULT_TARIFF });
   };
 
-  const styles = {
-    page: {
-      minHeight: "100vh",
-      padding: "24px",
-      background: "var(--bg, #0b1120)",
-      color: "var(--text, #e5e7eb)",
-      fontFamily: "Inter, system-ui, sans-serif",
-      boxSizing: "border-box",
-    },
-    container: {
-      maxWidth: "1400px",
-      margin: "0 auto",
-    },
-    header: {
-      display: "flex",
-      flexWrap: "wrap",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: "16px",
-      marginBottom: "24px",
-    },
-    title: {
-      margin: 0,
-      fontSize: "clamp(26px, 4vw, 36px)",
-    },
-    subtitle: {
-      margin: "8px 0 0",
-      color: "var(--muted, #94a3b8)",
-    },
-    button: {
-      border: "1px solid var(--border, #334155)",
-      background: "var(--card-bg, #111827)",
-      color: "var(--text, #e5e7eb)",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      cursor: "pointer",
-      fontWeight: 600,
-    },
-    primaryButton: {
-      border: "none",
-      background: "#6366f1",
-      color: "#fff",
-      padding: "10px 14px",
-      borderRadius: "10px",
-      cursor: "pointer",
-      fontWeight: 600,
-    },
-    grid: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-      gap: "16px",
-      marginBottom: "24px",
-    },
-    panel: {
-      background: "var(--card-bg, #111827)",
-      border: "1px solid var(--border, #263244)",
-      borderRadius: "16px",
-      padding: "20px",
-      marginBottom: "24px",
-      minWidth: 0,
-    },
-    statLabel: {
-      color: "var(--muted, #94a3b8)",
-      fontSize: "14px",
-    },
-    statValue: {
-      fontSize: "28px",
-      fontWeight: 750,
-      marginTop: "10px",
-      overflowWrap: "anywhere",
-    },
-    input: {
-      width: "100%",
-      boxSizing: "border-box",
-      padding: "10px 12px",
-      border: "1px solid var(--border, #334155)",
-      borderRadius: "9px",
-      background: "var(--bg, #0b1120)",
-      color: "var(--text, #e5e7eb)",
-    },
-    sectionTitle: {
-      margin: "0 0 16px",
-      fontSize: "21px",
-    },
-    tableWrap: {
-      overflowX: "auto",
-      width: "100%",
-    },
-    table: {
-      borderCollapse: "collapse",
-      width: "100%",
-      minWidth: "760px",
-      fontSize: "14px",
-    },
-    th: {
-      textAlign: "left",
-      padding: "12px 10px",
-      borderBottom: "1px solid var(--border, #334155)",
-      color: "var(--muted, #94a3b8)",
-      whiteSpace: "nowrap",
-    },
-    td: {
-      padding: "12px 10px",
-      borderBottom: "1px solid var(--border, #263244)",
-      whiteSpace: "nowrap",
-    },
-    muted: {
-      color: "var(--muted, #94a3b8)",
-    },
-    badge: {
-      display: "inline-block",
-      borderRadius: "999px",
-      padding: "4px 9px",
-      fontSize: "12px",
-      fontWeight: 700,
-    },
+
+  const roomMeta = (name) => {
+    const lower = name.toLowerCase();
+    if (lower.includes("living")) return { icon: "🛋️", tint: "violet" };
+    if (lower.includes("bed")) return { icon: "🛏️", tint: "blue" };
+    if (lower.includes("kitchen")) return { icon: "🍳", tint: "orange" };
+    if (lower.includes("study")) return { icon: "💻", tint: "green" };
+    if (lower.includes("bath")) return { icon: "🛁", tint: "pink" };
+    return { icon: "🏠", tint: "violet" };
   };
 
-  const statCard = (label, value, detail) => (
-    <div key={label} style={styles.panel}>
-      <div style={styles.statLabel}>{label}</div>
-      <div style={styles.statValue}>{value}</div>
-      {detail && (
-        <div style={{ ...styles.muted, fontSize: "13px", marginTop: "8px" }}>
-          {detail}
-        </div>
-      )}
-    </div>
+  const deviceMeta = (device) => {
+    const type = String(device.type ?? device.deviceType ?? "").toLowerCase();
+    if (type.includes("light")) return "💡";
+    if (type.includes("fan")) return "🌀";
+    if (type.includes("ac") || type.includes("air")) return "❄️";
+    if (type.includes("heat")) return "♨️";
+    return "🔌";
+  };
+
+  const goTo = (section) => {
+    setActiveSection(section);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const stat = (label, value, detail, icon, tint) => (
+    <article className="stat-card" key={label}>
+      <div className="stat-card-top">
+        <span className={`stat-icon ${tint}`}>{icon}</span>
+        <span className="stat-label">{label}</span>
+      </div>
+      <strong className="stat-value">{value}</strong>
+      <p className="stat-detail">{detail}</p>
+    </article>
   );
 
   return (
-    <div style={styles.page}>
-      <div style={styles.container}>
-        <header style={styles.header}>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-icon">⌂</div>
           <div>
-            <h1 style={styles.title}>SmartHomeOS</h1>
-            <p style={styles.subtitle}>
-              Smart control, energy monitoring and electricity bill estimates
-            </p>
+            <h2>SmartHome<span>OS</span></h2>
+            <p>INTELLIGENT LIVING</p>
           </div>
+        </div>
 
-          <button
-            style={styles.button}
-            onClick={() => {
-              loadDashboard(true);
-              loadEnergySessions();
-            }}
-          >
-            ↻ Refresh dashboard
-          </button>
+        <div className="nav-label">WORKSPACE</div>
+        <nav className="nav-list" aria-label="Main navigation">
+          {[
+            ["overview", "◫", "Overview"],
+            ["devices", "⌁", "Devices"],
+            ["rooms", "⌂", "Room management"],
+            ["energy", "ϟ", "Energy monitor"],
+            ["billing", "₹", "Bill estimator"],
+            ["history", "◷", "Session history"],
+          ].map(([id, icon, label]) => (
+            <button key={id} className={`nav-item ${activeSection === id ? "active" : ""}`} onClick={() => goTo(id)}>
+              <span className="nav-symbol">{icon}</span><span>{label}</span>
+              {id === "devices" && <small>{devices.length}</small>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-rooms">
+          <div className="nav-label">YOUR ROOMS</div>
+          {rooms.map((room) => {
+            const name = typeof room === "string" ? room : room.name ?? room.roomName;
+            if (!name) return null;
+            const meta = roomMeta(name);
+            return (
+              <button className="room-nav-item" key={name} onClick={() => { setSelectedRoom(name); goTo("devices"); }}>
+                <span>{meta.icon}</span><span>{name}</span>
+                <small>{devices.filter((d) => getRoomName(d) === name).length}</small>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="sidebar-status">
+          <span className={`connection-dot ${error ? "disconnected" : ""}`} />
+          <div><strong>{error ? "API connection issue" : "Smart home connected"}</strong><p>{error ? "Check backend status" : "Local system · Live sync"}</p></div>
+        </div>
+      </aside>
+
+      <main className="main-content">
+        <header className="topbar">
+          <div className="breadcrumb">Workspace <span>/</span> <strong>{activeSection.charAt(0).toUpperCase() + activeSection.slice(1)}</strong></div>
+          <div className="topbar-actions">
+            <span className="live-pill"><i /> LIVE DASHBOARD</span>
+            <button className="icon-button" aria-label="Refresh dashboard" title="Refresh dashboard" onClick={() => { loadDashboard(true); loadEnergySessions(); }}>↻</button>
+            <div className="avatar">S</div>
+          </div>
         </header>
 
-        {error && (
-          <div
-            role="alert"
-            style={{
-              ...styles.panel,
-              borderColor: "#ef4444",
-              color: "#fca5a5",
-            }}
-          >
-            {error}
+        {activeSection === "overview" && <>
+        <section id="overview" className="welcome-row">
+          <div>
+            <p className="eyebrow">YOUR HOME AT A GLANCE</p>
+            <h1>Welcome home<span>.</span></h1>
+            <p className="subtitle">Control your space, monitor energy, and make everyday living simpler.</p>
           </div>
-        )}
+          <div className="welcome-actions">
+            <div className="date-card"><span>◷</span><div><strong>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short" })}</strong><p>SmartHomeOS dashboard</p></div></div>
+            <button className="primary-button" onClick={() => { setShowDeviceForm(true); goTo("devices"); }}>＋ Add device</button>
+          </div>
+        </section>
 
-        {loading ? (
-          <div style={styles.panel}>Loading your smart home...</div>
-        ) : (
-          <>
-            <div style={styles.grid}>
-              {statCard("Total devices", devices.length, "Across your home")}
-              {statCard(
-                "Devices running",
-                `${activeDevices} / ${devices.length}`,
-                "Currently switched ON"
-              )}
-              {statCard(
-                "Active power",
-                `${(totalPowerWatts / 1000).toFixed(3)} kW`,
-                `${totalPowerWatts.toLocaleString("en-IN")} watts`
-              )}
-              {statCard("Rooms", rooms.length, "Configured rooms")}
+        {error && <div className="alert alert-error" role="alert"><span>⚠</span><div><strong>Connection notice</strong><p>{error}</p></div><button onClick={() => setError("")} aria-label="Dismiss error">×</button></div>}
+
+        <section className="stats-grid" aria-label="Home statistics">
+          {stat("Total devices", devices.length, "Registered across your home", "⌁", "purple")}
+          {stat("Devices online", `${activeDevices}/${devices.length}`, "Currently switched on", "ϟ", "green")}
+          {stat("Active power", <>{(totalPowerWatts / 1000).toFixed(2)} <small>kW</small></>, `${totalPowerWatts.toLocaleString("en-IN")} watts in use`, "ϟ", "amber")}
+          {stat("Rooms", rooms.length, "Configured spaces", "⌂", "blue")}
+        </section>
+
+        </>}
+
+        {activeSection === "devices" && <section id="devices" className="content-section">
+          <div className="section-heading">
+            <div><p className="eyebrow">CONTROL CENTER</p><h2>Devices <span className="count-chip">{filteredDevices.length}</span></h2><p className="section-subtitle">Your connected appliances, all in one place.</p></div>
+            <div className="bulk-actions">
+              <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(true)}>Power all on</button>
+              <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(false)}>Power all off</button>
+              <button className="primary-button" onClick={() => { setShowDeviceForm((v) => !v); setDeviceMessage(""); }}>{showDeviceForm ? "Cancel" : "＋ Add device"}</button>
             </div>
+          </div>
 
-
-            <section style={styles.panel}>
-              <h2 style={styles.sectionTitle}>Room Management</h2>
-
-              <p style={styles.muted}>
-                Create rooms, rename existing rooms, or remove rooms that have no devices.
-              </p>
-
-              <form
-                onSubmit={createRoom}
-                style={{
-                  display: "flex",
-                  gap: "10px",
-                  flexWrap: "wrap",
-                  marginBottom: "18px",
-                }}
-              >
-                <input
-                  style={{ ...styles.input, flex: "1 1 220px" }}
-                  placeholder="Enter new room name"
-                  value={roomNameInput}
-                  onChange={(event) => setRoomNameInput(event.target.value)}
-                  maxLength={60}
-                  disabled={roomBusy}
-                />
-
-                <button
-                  type="submit"
-                  style={styles.primaryButton}
-                  disabled={roomBusy}
-                >
-                  {roomBusy ? "Please wait..." : "＋ Add Room"}
-                </button>
-              </form>
-
-              {roomMessage && (
-                <p
-                  role="status"
-                  style={{
-                    color: roomMessage.startsWith("Error:")
-                      ? "#fca5a5"
-                      : "#4ade80",
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {roomMessage}
-                </p>
-              )}
-
-              {rooms.length === 0 ? (
-                <p style={styles.muted}>No rooms configured yet.</p>
-              ) : (
-                <div style={styles.grid}>
-                  {rooms.map((room) => {
-                    const name =
-                      typeof room === "string"
-                        ? room
-                        : room.name ?? room.roomName;
-
-                    if (!name) return null;
-
-                    const count = devices.filter(
-                      (device) => getRoomName(device) === name
-                    ).length;
-
-                    const isEditing = editingRoom === name;
-
-                    return (
-                      <div
-                        key={name}
-                        style={{
-                          ...styles.panel,
-                          marginBottom: 0,
-                        }}
-                      >
-                        {isEditing ? (
-                          <form onSubmit={renameRoom}>
-                            <label
-                              style={{
-                                display: "block",
-                                marginBottom: "8px",
-                              }}
-                            >
-                              New room name
-                            </label>
-
-                            <input
-                              style={styles.input}
-                              value={editingRoomName}
-                              onChange={(event) =>
-                                setEditingRoomName(event.target.value)
-                              }
-                              maxLength={60}
-                              autoFocus
-                              disabled={roomBusy}
-                            />
-
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                                marginTop: "12px",
-                              }}
-                            >
-                              <button
-                                type="submit"
-                                style={styles.primaryButton}
-                                disabled={roomBusy}
-                              >
-                                Save
-                              </button>
-
-                              <button
-                                type="button"
-                                style={styles.button}
-                                disabled={roomBusy}
-                                onClick={() => {
-                                  setEditingRoom(null);
-                                  setEditingRoomName("");
-                                }}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </form>
-                        ) : (
-                          <>
-                            <h3 style={{ marginTop: 0, overflowWrap: "anywhere" }}>
-                              {name}
-                            </h3>
-
-                            <p style={styles.muted}>
-                              {count} {count === 1 ? "device" : "devices"}
-                            </p>
-
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                              }}
-                            >
-                              <button
-                                type="button"
-                                style={styles.button}
-                                disabled={roomBusy}
-                                onClick={() => {
-                                  setEditingRoom(name);
-                                  setEditingRoomName(name);
-                                  setRoomMessage("");
-                                }}
-                              >
-                                Rename
-                              </button>
-
-                              <button
-                                type="button"
-                                style={{
-                                  ...styles.button,
-                                  borderColor: "#ef4444",
-                                  color: "#fca5a5",
-                                }}
-                                disabled={roomBusy || count > 0}
-                                title={
-                                  count > 0
-                                    ? "Remove all devices from this room first."
-                                    : "Delete this empty room"
-                                }
-                                onClick={() => deleteRoom(name)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-
-                            {count > 0 && (
-                              <p style={{ ...styles.muted, fontSize: "12px" }}>
-                                Remove this room's devices before deleting it.
-                              </p>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-
-            <section style={styles.panel}>
-              <h2 style={styles.sectionTitle}>Energy Monitor</h2>
-
-              {energyError && (
-                <p style={{ color: "#fca5a5" }}>{energyError}</p>
-              )}
-
-              <div style={styles.grid}>
-                {statCard(
-                  "Recorded energy",
-                  `${totalEnergyKwh.toFixed(4)} kWh`,
-                  "Sum of recorded energy sessions"
-                )}
-                {statCard(
-                  "Active sessions",
-                  activeSessionCount,
-                  "Devices with ongoing sessions"
-                )}
-                {statCard(
-                  "Estimated bill",
-                  `₹${bill.total.toFixed(2)}`,
-                  "Based on current tariff settings"
-                )}
+          {showDeviceForm && (
+            <form className="device-form panel" onSubmit={handleAddDevice}>
+              <div className="form-heading"><div><p className="eyebrow">NEW CONNECTION</p><h3>Add a device</h3></div><button type="button" className="icon-button" onClick={() => setShowDeviceForm(false)} aria-label="Close form">×</button></div>
+              <div className="form-grid">
+                <label>Device ID<input value={deviceForm.id} onChange={(e) => setDeviceForm({ ...deviceForm, id: e.target.value })} placeholder="e.g. BEDROOM_LIGHT_02" required /></label>
+                <label>Display name<input value={deviceForm.name} onChange={(e) => setDeviceForm({ ...deviceForm, name: e.target.value })} placeholder="e.g. Bedside lamp" required /></label>
+                <label>Device type<select value={deviceForm.type} onChange={(e) => setDeviceForm({ ...deviceForm, type: e.target.value })}><option>Light</option><option>Fan</option><option>AC</option><option>Heater</option><option>Other</option></select></label>
+                <label>Room<select value={deviceForm.roomName} onChange={(e) => setDeviceForm({ ...deviceForm, roomName: e.target.value })} required><option value="">Select a room</option>{rooms.map((room) => { const name = typeof room === "string" ? room : room.name ?? room.roomName; return name ? <option key={name} value={name}>{name}</option> : null; })}</select></label>
+                <label>Rated power (watts)<input type="number" min="1" value={deviceForm.powerWatts} onChange={(e) => setDeviceForm({ ...deviceForm, powerWatts: e.target.value })} required /></label>
+                <div className="temporary-field"><label className="checkbox-label"><input type="checkbox" checked={deviceForm.temporary} onChange={(e) => setDeviceForm({ ...deviceForm, temporary: e.target.checked })} /> Temporary device</label>{deviceForm.temporary && <div className="lifetime-row"><input aria-label="Device lifetime" type="number" min="1" value={deviceForm.lifetimeValue} onChange={(e) => setDeviceForm({ ...deviceForm, lifetimeValue: e.target.value })} required /><select aria-label="Lifetime unit" value={deviceForm.lifetimeUnit} onChange={(e) => setDeviceForm({ ...deviceForm, lifetimeUnit: e.target.value })}><option value="minutes">Minutes</option><option value="hours">Hours</option></select></div>}</div>
               </div>
+              {deviceMessage && <div className={`form-message ${deviceMessage.startsWith("Error") ? "is-error" : "is-success"}`} role="status">{deviceMessage}</div>}
+              <div className="form-actions"><button type="button" className="secondary-button" onClick={() => setShowDeviceForm(false)}>Cancel</button><button type="submit" className="primary-button" disabled={deviceBusy}>{deviceBusy ? "Adding device…" : "Add device"}</button></div>
+            </form>
+          )}
 
-              <p style={styles.muted}>
-                Energy usage is estimated from rated device power and operating
-                time. It is not a physical meter reading.
-              </p>
-            </section>
+          <div className="toolbar">
+            <label className="search-box"><span>⌕</span><input placeholder="Search devices or rooms…" value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌕</kbd></label>
+            <label className="filter-select"><span>Room</span><select value={selectedRoom} onChange={(e) => setSelectedRoom(e.target.value)}><option>All Rooms</option>{rooms.map((room) => { const name = typeof room === "string" ? room : room.name ?? room.roomName; return name ? <option key={name} value={name}>{name}</option> : null; })}</select></label>
+          </div>
 
-            <section style={styles.panel}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  flexWrap: "wrap",
-                  gap: "12px",
-                  marginBottom: "16px",
-                }}
-              >
-                <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
-                  Electricity Bill Estimator
-                </h2>
+          {loading ? <div className="empty-state"><div className="loading-orb" /><h3>Connecting to your home…</h3><p>Fetching the latest device status.</p></div> : Object.keys(deviceGroups).length === 0 ? <div className="empty-state"><span>⌁</span><h3>No devices found</h3><p>Try another search or add a device to get started.</p><button className="primary-button" onClick={() => setShowDeviceForm(true)}>＋ Add your first device</button></div> : Object.entries(deviceGroups).map(([roomName, roomDevices]) => {
+            const meta = roomMeta(roomName);
+            const onCount = roomDevices.filter(isDeviceOn).length;
+            return <div className="room-section" key={roomName}>
+              <div className="room-heading"><div className="room-title"><span className={`room-emoji ${meta.tint}`}>{meta.icon}</span><div><h3>{roomName}</h3><p>{onCount} of {roomDevices.length} devices active</p></div></div><button className="text-button" onClick={() => setSelectedRoom(roomName)}>View room →</button></div>
+              <div className="device-grid">{roomDevices.map((device) => {
+                const id = getDeviceId(device);
+                const on = isDeviceOn(device);
+                const busy = Boolean(updatingDevices[id]);
+                const deleting = Boolean(deletingDevices[id]);
+                return <article className={`device-card ${on ? "device-on" : ""}`} key={id}>
+                  <div className="device-card-top"><span className={`device-icon ${on ? "icon-on" : ""}`}>{deviceMeta(device)}</span><span className={`status-tag ${on ? "status-on" : "status-off"}`}><i />{on ? "ONLINE" : "OFFLINE"}</span></div>
+                  <h4>{getDeviceName(device)}</h4><p className="device-type">{device.type ?? device.deviceType ?? "Smart appliance"}</p>
+                  <div className="device-details"><span>Rated power</span><strong>{getDevicePower(device)} W</strong></div>
+                  <div className="device-card-bottom"><span className="device-id" title={id}>{id}</span><button type="button" role="switch" aria-checked={on} aria-label={`${on ? "Turn off" : "Turn on"} ${getDeviceName(device)}`} className={`toggle ${on ? "toggle-on" : ""}`} disabled={busy} onClick={() => updateDevicePower(device, !on)}><span /></button></div>
+                  <button className="delete-device" disabled={busy || deleting} onClick={() => deleteDevice(device)}>{deleting ? "Deleting…" : "Remove device"}</button>
+                </article>;
+              })}</div>
+            </div>;
+          })}
+        </section>}
 
-                <button
-                  style={styles.button}
-                  onClick={() => setShowTariffSettings((value) => !value)}
-                >
-                  {showTariffSettings ? "Hide tariff settings" : "Edit tariff"}
-                </button>
-              </div>
+        {activeSection === "rooms" && <section id="rooms" className="content-section">
+          <div className="section-heading"><div><p className="eyebrow">SPACE MANAGEMENT</p><h2>Your rooms</h2><p className="section-subtitle">Organize devices by the spaces they belong to.</p></div></div>
+          <form className="inline-create panel" onSubmit={createRoom}><label className="grow-field">Create a room<input value={roomNameInput} onChange={(e) => setRoomNameInput(e.target.value)} placeholder="e.g. Balcony" maxLength={60} /></label><button className="primary-button" disabled={roomBusy}>{roomBusy ? "Saving…" : "＋ Add room"}</button></form>
+          {roomMessage && <div className={`form-message ${roomMessage.startsWith("Error") ? "is-error" : "is-success"}`} role="status">{roomMessage}</div>}
+          <div className="room-management-grid">{rooms.map((room) => {
+            const name = typeof room === "string" ? room : room.name ?? room.roomName;
+            if (!name) return null;
+            const count = devices.filter((d) => getRoomName(d) === name).length;
+            const meta = roomMeta(name);
+            return <article className="room-management-card" key={name}><span className={`room-emoji ${meta.tint}`}>{meta.icon}</span>{editingRoom === name ? <form onSubmit={renameRoom} className="rename-form"><input value={editingRoomName} onChange={(e) => setEditingRoomName(e.target.value)} autoFocus required /><div><button className="primary-button" disabled={roomBusy}>Save</button><button type="button" className="secondary-button" onClick={() => setEditingRoom(null)}>Cancel</button></div></form> : <><div className="room-management-info"><h3>{name}</h3><p>{count} {count === 1 ? "device" : "devices"}</p></div><div className="room-management-actions"><button className="secondary-button" onClick={() => { setEditingRoom(name); setEditingRoomName(name); setRoomMessage(""); }}>Rename</button><button className="secondary-button danger-button" disabled={roomBusy || count > 0} title={count ? "Remove devices from this room first" : "Delete empty room"} onClick={() => deleteRoom(name)}>Delete</button></div></>}</article>;
+          })}</div>
+        </section>}
 
-              <p style={styles.muted}>
-                MSEDCL-inspired residential slab assumptions. The calculation
-                below applies each energy rate progressively to the units
-                recorded by SmartHomeOS.
-              </p>
+        {activeSection === "energy" && <section id="energy" className="content-section">
+          <div className="section-heading"><div><p className="eyebrow">ENERGY INTELLIGENCE</p><h2>Energy monitor</h2><p className="section-subtitle">Usage estimates from device power ratings and recorded run time.</p></div></div>
+          {energyError && <div className="alert alert-error" role="alert">{energyError}</div>}
+          <div className="stats-grid energy-stats">
+            {stat("Recorded energy", `${totalEnergyKwh.toFixed(4)} kWh`, "Across recorded sessions", "ϟ", "amber")}
+            {stat("Active sessions", activeSessionCount, "Devices currently consuming energy", "◷", "green")}
+            {stat("Estimated bill", `₹${bill.total.toFixed(2)}`, "Using the configured tariff assumptions", "₹", "purple")}
+            {stat("Live load", `${totalPowerWatts.toLocaleString("en-IN")} W`, "Combined rated power of ON devices", "⌁", "blue")}
+          </div>
+          <div className="panel note-panel"><span>ⓘ</span><p>These values are software estimates, not physical meter readings. Energy totals reflect the sessions returned by your backend.</p></div>
+        </section>}
 
-              {showTariffSettings && (
-                <form
-                  onSubmit={saveTariffSettings}
-                  style={{
-                    border: "1px solid var(--border, #334155)",
-                    borderRadius: "12px",
-                    padding: "16px",
-                    margin: "18px 0",
-                  }}
-                >
-                  <h3 style={{ marginTop: 0 }}>Tariff settings</h3>
+        {activeSection === "billing" && <section id="billing" className="content-section">
+          <div className="section-heading"><div><p className="eyebrow">COST PLANNING</p><h2>Electricity bill estimator</h2><p className="section-subtitle">An editable, illustrative slab-based estimate — not an official utility bill.</p></div><button className="secondary-button" onClick={() => setShowTariffSettings((v) => !v)}>{showTariffSettings ? "Hide tariff settings" : "⚙ Edit tariff"}</button></div>
+          {showTariffSettings && <form className="panel tariff-form" onSubmit={saveTariffSettings}><div className="form-grid">{[["slab1","First 100 units (₹/unit)"],["slab2","101–300 units (₹/unit)"],["slab3","301–500 units (₹/unit)"],["slab4","Above 500 units (₹/unit)"],["wheeling","Wheeling charge (₹/unit)"],["fixedCharge","Fixed charge (₹/period)"],["dutyPercent","Electricity duty (%)"]].map(([key,label]) => <label key={key}>{label}<input type="number" min="0" step="0.01" value={tariffInputs[key]} onChange={(e) => handleTariffInput(key,e.target.value)} required /></label>)}</div><div className="form-actions"><button type="button" className="secondary-button" onClick={resetTariff}>Reset defaults</button><button className="primary-button">Apply rates</button></div><p className="fine-print">Tariff values are held in React state and reset on page reload. Verify the assumptions for your consumer category.</p></form>}
+          <div className="billing-layout"><div className="bill-total-card"><p>ESTIMATED TOTAL</p><strong>₹{bill.total.toFixed(2)}</strong><span>Based on {bill.units.toFixed(4)} recorded units</span><div className="bill-total-foot"><span>Energy charges</span><strong>₹{bill.energyCharge.toFixed(2)}</strong></div></div><div className="panel bill-breakdown"><h3>Charge breakdown</h3>{[["First 100 units",bill.first*tariff.slab1],["101–300 units",bill.second*tariff.slab2],["301–500 units",bill.third*tariff.slab3],["Above 500 units",bill.fourth*tariff.slab4],["Wheeling charges",bill.wheelingCharge],["Fixed charge",bill.fixedCharge],["Electricity duty",bill.duty]].map(([label,value]) => <div className="bill-row" key={label}><span>{label}</span><strong>₹{Number(value).toFixed(2)}</strong></div>)}<div className="bill-row bill-row-total"><span>Estimated total</span><strong>₹{bill.total.toFixed(2)}</strong></div></div></div>
+          <p className="fine-print">The default slab rates, fixed charge and duty are assumptions for demonstration. This estimate does not apply a calendar billing-period filter and may omit charges or adjustments on an actual bill.</p>
+        </section>}
 
-                  <div style={styles.grid}>
-                    {[
-                      ["slab1", "First 100 units (₹/unit)"],
-                      ["slab2", "101–300 units (₹/unit)"],
-                      ["slab3", "301–500 units (₹/unit)"],
-                      ["slab4", "Above 500 units (₹/unit)"],
-                      ["wheeling", "Wheeling charge (₹/unit)"],
-                      ["fixedCharge", "Fixed charge (₹/billing period)"],
-                      ["dutyPercent", "Electricity duty (%)"],
-                    ].map(([key, label]) => (
-                      <label key={key} style={{ display: "block" }}>
-                        <span
-                          style={{
-                            display: "block",
-                            marginBottom: "7px",
-                            fontSize: "13px",
-                          }}
-                        >
-                          {label}
-                        </span>
-                        <input
-                          style={styles.input}
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={tariffInputs[key]}
-                          onChange={(event) =>
-                            handleTariffInput(key, event.target.value)
-                          }
-                          required
-                        />
-                      </label>
-                    ))}
-                  </div>
+        {activeSection === "history" && <section id="history" className="content-section">
+          <div className="section-heading"><div><p className="eyebrow">ACTIVITY LOG</p><h2>Energy session history</h2><p className="section-subtitle">A record of device activity reported by the backend.</p></div><span className="count-chip">{sessions.length} records</span></div>
+          {energyLoading ? <div className="panel">Loading energy history…</div> : sessions.length === 0 ? <div className="empty-state"><span>◷</span><h3>No sessions yet</h3><p>Turn on a device to begin tracking its estimated energy use.</p></div> : <div className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>Device</th><th>Room</th><th>Power</th><th>Duration</th><th>Energy</th><th>Status</th><th>Started</th></tr></thead><tbody>{[...sessions].sort((a,b) => Number(b.startedAt || 0)-Number(a.startedAt || 0)).map((session,index) => { const active = session.active || Number(session.endedAt) === 0; const duration = active ? Math.max(0,Math.floor(Date.now()/1000)-Number(session.startedAt || 0)) : Math.max(0,Number(session.endedAt || 0)-Number(session.startedAt || 0)); return <tr key={session.id ?? `${session.deviceId}-${index}`}><td><strong>{session.deviceName ?? "Unknown device"}</strong></td><td>{session.roomName ?? "—"}</td><td>{Number(session.powerWatts || 0)} W</td><td>{formatDuration(duration)}</td><td>{Number(session.energyKwh || 0).toFixed(5)} kWh</td><td><span className={`status-tag ${active ? "status-on" : "status-off"}`}>{active ? "ACTIVE" : "COMPLETED"}</span></td><td>{formatDate(Number(session.startedAt || 0))}</td></tr>; })}</tbody></table></div></div>}
+        </section>}
 
-                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                    <button type="submit" style={styles.primaryButton}>
-                      Apply rates
-                    </button>
-                    <button
-                      type="button"
-                      style={styles.button}
-                      onClick={resetTariff}
-                    >
-                      Reset defaults
-                    </button>
-                  </div>
-
-                  <p style={{ ...styles.muted, fontSize: "12px" }}>
-                    These settings currently remain in React state and reset
-                    when the page reloads. Saving them to SQLite is a separate
-                    next step.
-                  </p>
-                </form>
-              )}
-
-              <div style={styles.grid}>
-                {statCard(
-                  "Recorded units",
-                  `${bill.units.toFixed(4)} kWh`,
-                  "1 kWh equals 1 electricity unit"
-                )}
-                {statCard(
-                  "Energy charges",
-                  `₹${bill.energyCharge.toFixed(2)}`,
-                  "Calculated progressively by slab"
-                )}
-                {statCard(
-                  "Additional charges",
-                  `₹${(bill.wheelingCharge + bill.fixedCharge + bill.duty).toFixed(2)}`,
-                  "Wheeling + fixed charge + duty"
-                )}
-                {statCard(
-                  "Estimated total",
-                  `₹${bill.total.toFixed(2)}`,
-                  "For the configured billing period"
-                )}
-              </div>
-
-              <h3>Charge breakdown</h3>
-
-              <div style={styles.tableWrap}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Charge</th>
-                      <th style={styles.th}>Calculation</th>
-                      <th style={styles.th}>Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style={styles.td}>First 100 units</td>
-                      <td style={styles.td}>
-                        {bill.first.toFixed(4)} × ₹{tariff.slab1.toFixed(2)}
-                      </td>
-                      <td style={styles.td}>
-                        ₹{(bill.first * tariff.slab1).toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>101–300 units</td>
-                      <td style={styles.td}>
-                        {bill.second.toFixed(4)} × ₹{tariff.slab2.toFixed(2)}
-                      </td>
-                      <td style={styles.td}>
-                        ₹{(bill.second * tariff.slab2).toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>301–500 units</td>
-                      <td style={styles.td}>
-                        {bill.third.toFixed(4)} × ₹{tariff.slab3.toFixed(2)}
-                      </td>
-                      <td style={styles.td}>
-                        ₹{(bill.third * tariff.slab3).toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>Above 500 units</td>
-                      <td style={styles.td}>
-                        {bill.fourth.toFixed(4)} × ₹{tariff.slab4.toFixed(2)}
-                      </td>
-                      <td style={styles.td}>
-                        ₹{(bill.fourth * tariff.slab4).toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>Wheeling charges</td>
-                      <td style={styles.td}>
-                        {bill.units.toFixed(4)} × ₹{tariff.wheeling.toFixed(2)}
-                      </td>
-                      <td style={styles.td}>
-                        ₹{bill.wheelingCharge.toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>Fixed charge</td>
-                      <td style={styles.td}>Configured amount</td>
-                      <td style={styles.td}>
-                        ₹{bill.fixedCharge.toFixed(2)}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style={styles.td}>Electricity duty</td>
-                      <td style={styles.td}>
-                        {tariff.dutyPercent}% of energy + wheeling charges
-                      </td>
-                      <td style={styles.td}>₹{bill.duty.toFixed(2)}</td>
-                    </tr>
-                    <tr>
-                      <td style={{ ...styles.td, fontWeight: 800 }}>
-                        Estimated total
-                      </td>
-                      <td style={styles.td}>All charges added</td>
-                      <td style={{ ...styles.td, fontWeight: 800 }}>
-                        ₹{bill.total.toFixed(2)}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <p style={{ ...styles.muted, fontSize: "12px", marginTop: "16px" }}>
-                This is an illustrative estimate, not an official MSEDCL bill.
-                The configured ₹100 fixed charge and 16% duty are assumptions
-                that you should verify for your consumer category. Actual bills
-                can include other charges, credits, taxes and adjustments.
-                This calculation uses all recorded sessions and does not yet
-                filter energy by a calendar billing period.
-              </p>
-            </section>
-
-            <section style={styles.panel}>
-              <h2 style={styles.sectionTitle}>Rooms and Devices</h2>
-
-              <button
-                style={styles.button}
-                onClick={() => {
-                  setShowDeviceForm((current) => !current);
-                  setDeviceMessage("");
-                }}
-              >
-                {showDeviceForm ? "Cancel" : "+ Add Device"}
-              </button>
-
-              {showDeviceForm && (
-                <div style={{ ...styles.panel, marginTop: "16px" }}>
-                  <h3>Add a New Device</h3>
-
-                  <form
-                    onSubmit={handleAddDevice}
-                    style={{
-                      display: "grid",
-                      gap: "12px",
-                      maxWidth: "500px",
-                    }}
-                  >
-                    <input
-                      placeholder="Device ID (e.g. BEDROOM_LIGHT_02)"
-                      value={deviceForm.id}
-                      onChange={(e) =>
-                        setDeviceForm({ ...deviceForm, id: e.target.value })
-                      }
-                      required
-                    />
-
-                    <input
-                      placeholder="Device Name (e.g. Bedroom Light)"
-                      value={deviceForm.name}
-                      onChange={(e) =>
-                        setDeviceForm({ ...deviceForm, name: e.target.value })
-                      }
-                      required
-                    />
-
-                    <label>
-                      Device Type
-                      <select
-                        value={deviceForm.type}
-                        onChange={(e) =>
-                          setDeviceForm({ ...deviceForm, type: e.target.value })
-                        }
-                      >
-                        <option value="Light">Light</option>
-                        <option value="Fan">Fan</option>
-                        <option value="AC">AC</option>
-                        <option value="Heater">Heater</option>
-                        <option value="Other">Other</option>
-                      </select>
-                    </label>
-
-                    <label>
-                      Room
-                      <select
-                        value={deviceForm.roomName}
-                        onChange={(e) =>
-                          setDeviceForm({ ...deviceForm, roomName: e.target.value })
-                        }
-                        required
-                      >
-                        <option value="">Select a room</option>
-                        {rooms.map((room) => {
-                          const name =
-                            typeof room === "string"
-                              ? room
-                              : room.name || room.roomName;
-
-                          return name ? (
-                            <option key={name} value={name}>
-                              {name}
-                            </option>
-                          ) : null;
-                        })}
-                      </select>
-                    </label>
-
-                    <label>
-                      Power Consumption (Watts)
-                      <input
-                        type="number"
-                        min="1"
-                        value={deviceForm.powerWatts}
-                        onChange={(e) =>
-                          setDeviceForm({
-                            ...deviceForm,
-                            powerWatts: e.target.value,
-                          })
-                        }
-                        required
-                      />
-                    </label>
-
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={deviceForm.temporary}
-                        onChange={(e) =>
-                          setDeviceForm({
-                            ...deviceForm,
-                            temporary: e.target.checked,
-                          })
-                        }
-                      />
-                      Temporary device
-                    </label>
-
-                    {deviceForm.temporary && (
-                      <div style={{ display: "flex", gap: "8px" }}>
-                        <input
-                          type="number"
-                          min="1"
-                          value={deviceForm.lifetimeValue}
-                          onChange={(e) =>
-                            setDeviceForm({
-                              ...deviceForm,
-                              lifetimeValue: e.target.value,
-                            })
-                          }
-                          required
-                        />
-
-                        <select
-                          value={deviceForm.lifetimeUnit}
-                          onChange={(e) =>
-                            setDeviceForm({
-                              ...deviceForm,
-                              lifetimeUnit: e.target.value,
-                            })
-                          }
-                        >
-                          <option value="minutes">Minutes</option>
-                          <option value="hours">Hours</option>
-                        </select>
-                      </div>
-                    )}
-
-                    <button type="submit" style={styles.button} disabled={deviceBusy}>
-                      {deviceBusy ? "Adding..." : "Add Device"}
-                    </button>
-
-                    {deviceMessage && <p>{deviceMessage}</p>}
-                  </form>
-                </div>
-              )}
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                  gap: "12px",
-                  marginBottom: "18px",
-                }}
-              >
-                <label>
-                  <span style={{ display: "block", marginBottom: "7px" }}>
-                    Search devices
-                  </span>
-                  <input
-                    style={styles.input}
-                    placeholder="Search device or room..."
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                  />
-                </label>
-
-                <label>
-                  <span style={{ display: "block", marginBottom: "7px" }}>
-                    Filter by room
-                  </span>
-                  <select
-                    style={styles.input}
-                    value={selectedRoom}
-                    onChange={(event) => setSelectedRoom(event.target.value)}
-                  >
-                    <option value="All Rooms">All Rooms</option>
-                    {rooms.map((room) => {
-                      const roomName =
-                        typeof room === "string"
-                          ? room
-                          : room.name ?? room.roomName;
-
-                      return roomName ? (
-                        <option key={roomName} value={roomName}>
-                          {roomName}
-                        </option>
-                      ) : null;
-                    })}
-                  </select>
-                </label>
-              </div>
-
-              <div
-                style={{
-                  display: "flex",
-                  gap: "10px",
-                  flexWrap: "wrap",
-                  marginBottom: "22px",
-                }}
-              >
-                <button
-                  style={styles.primaryButton}
-                  disabled={bulkUpdating}
-                  onClick={() => bulkToggle(true)}
-                >
-                  Turn filtered devices ON
-                </button>
-                <button
-                  style={styles.button}
-                  disabled={bulkUpdating}
-                  onClick={() => bulkToggle(false)}
-                >
-                  Turn filtered devices OFF
-                </button>
-              </div>
-
-              {Object.keys(deviceGroups).length === 0 ? (
-                <p style={styles.muted}>No devices match your search.</p>
-              ) : (
-                Object.entries(deviceGroups).map(([roomName, roomDevices]) => (
-                  <div key={roomName} style={{ marginBottom: "24px" }}>
-                    <h3 style={{ marginBottom: "12px" }}>{roomName}</h3>
-
-                    <div style={styles.grid}>
-                      {roomDevices.map((device) => {
-                        const id = getDeviceId(device);
-                        const on = isDeviceOn(device);
-                        const power = getDevicePower(device);
-                        const busy = Boolean(updatingDevices[id]);
-
-                        return (
-                          <div
-                            key={id}
-                            style={{
-                              ...styles.panel,
-                              marginBottom: 0,
-                              borderColor: on ? "#6366f1" : undefined,
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                gap: "10px",
-                                alignItems: "flex-start",
-                              }}
-                            >
-                              <div>
-                                <h4 style={{ margin: "0 0 8px" }}>
-                                  {getDeviceName(device)}
-                                </h4>
-                                <p style={{ ...styles.muted, margin: 0 }}>
-                                  {power} W rated power
-                                </p>
-                              </div>
-
-                              <span
-                                style={{
-                                  ...styles.badge,
-                                  background: on
-                                    ? "rgba(34,197,94,0.15)"
-                                    : "rgba(148,163,184,0.12)",
-                                  color: on ? "#4ade80" : "#94a3b8",
-                                }}
-                              >
-                                {on ? "ON" : "OFF"}
-                              </span>
-                            </div>
-
-
-                            <button
-                              type="button"
-                              style={{
-                                ...(on ? styles.button : styles.primaryButton),
-                                width: "100%",
-                                marginTop: "18px",
-                                opacity: busy ? 0.6 : 1,
-                              }}
-                              disabled={busy}
-                              onClick={() => updateDevicePower(device, !on)}
-                            >
-                              {busy
-                                ? "Updating..."
-                                : on
-                                  ? "Turn OFF"
-                                  : "Turn ON"}
-                            </button>
-
-                            <button
-                              type="button"
-                              style={{
-                                ...styles.button,
-                                background: "#7f1d1d",
-                                marginTop: "8px",
-                                width: "100%",
-                              }}
-                              disabled={busy || Boolean(deletingDevices[id])}
-                              onClick={() => deleteDevice(device)}
-                            >
-                              {deletingDevices[id] ? "Deleting..." : "Delete Device"}
-                            </button>
-
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))
-              )}
-            </section>
-
-            <section style={styles.panel}>
-              <h2 style={styles.sectionTitle}>Energy Session History</h2>
-
-              {energyLoading ? (
-                <p style={styles.muted}>Loading energy sessions...</p>
-              ) : sessions.length === 0 ? (
-                <p style={styles.muted}>
-                  No energy sessions recorded yet. Turn a device ON to start
-                  tracking its estimated usage.
-                </p>
-              ) : (
-                <div style={styles.tableWrap}>
-                  <table style={styles.table}>
-                    <thead>
-                      <tr>
-                        <th style={styles.th}>Device</th>
-                        <th style={styles.th}>Room</th>
-                        <th style={styles.th}>Power</th>
-                        <th style={styles.th}>Duration</th>
-                        <th style={styles.th}>Energy</th>
-                        <th style={styles.th}>Status</th>
-                        <th style={styles.th}>Started</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {[...sessions]
-                        .sort(
-                          (a, b) =>
-                            Number(b.startedAt || 0) -
-                            Number(a.startedAt || 0)
-                        )
-                        .map((session, index) => {
-                          const active =
-                            session.active || Number(session.endedAt) === 0;
-
-                          const durationSeconds = active
-                            ? Math.max(
-                              0,
-                              Math.floor(Date.now() / 1000) -
-                              Number(session.startedAt || 0)
-                            )
-                            : Math.max(
-                              0,
-                              Number(session.endedAt || 0) -
-                              Number(session.startedAt || 0)
-                            );
-
-                          return (
-                            <tr
-                              key={session.id ?? `${session.deviceId}-${index}`}
-                            >
-                              <td style={styles.td}>
-                                {session.deviceName ?? "Unknown device"}
-                              </td>
-                              <td style={styles.td}>
-                                {session.roomName ?? "—"}
-                              </td>
-                              <td style={styles.td}>
-                                {Number(session.powerWatts || 0)} W
-                              </td>
-                              <td style={styles.td}>
-                                {formatDuration(durationSeconds)}
-                              </td>
-                              <td style={styles.td}>
-                                {Number(session.energyKwh || 0).toFixed(5)} kWh
-                              </td>
-                              <td style={styles.td}>
-                                <span
-                                  style={{
-                                    ...styles.badge,
-                                    background: active
-                                      ? "rgba(34,197,94,0.15)"
-                                      : "rgba(148,163,184,0.12)",
-                                    color: active ? "#4ade80" : "#94a3b8",
-                                  }}
-                                >
-                                  {active ? "ACTIVE" : "COMPLETED"}
-                                </span>
-                              </td>
-                              <td style={styles.td}>
-                                {formatDate(Number(session.startedAt || 0))}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          </>
-        )}
-
-        <footer
-          style={{
-            ...styles.muted,
-            fontSize: "12px",
-            textAlign: "center",
-            padding: "10px 0 24px",
-          }}
-        >
-          SmartHomeOS · Energy values are software estimates, not meter readings.
-        </footer>
-      </div>
+        <footer className="footer"><span>SmartHomeOS <span className="footer-dot">●</span> Built for smarter everyday living</span><span>Energy readings are software estimates · Local API</span></footer>
+      </main>
     </div>
   );
 }

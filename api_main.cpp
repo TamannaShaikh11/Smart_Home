@@ -27,8 +27,9 @@ int main()
 
         // Allow requests from the React/Vite development server.
         server.set_default_headers({{"Access-Control-Allow-Origin", "http://localhost:5173"},
-                                    {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
-                                    {"Access-Control-Allow-Headers", "Content-Type"}});
+                                    {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
+                                    {"Access-Control-Allow-Headers", "Content-Type"}
+                                });
 
         // Handle browser CORS preflight requests.
         server.Options(R"(/api/.*)",
@@ -299,9 +300,9 @@ int main()
                                 return;
                             }
 
-                            if (powerWatts < 0)
+                            if (powerWatts <= 0)
                             {
-                                fail(400, "Power consumption cannot be negative.");
+                                fail(400, "Power consumption cannot be zero or negative.");
                                 return;
                             }
 

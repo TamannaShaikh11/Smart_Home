@@ -437,35 +437,54 @@ function App() {
   };
 
 
+
   const handleAddDevice = async (event) => {
     event.preventDefault();
 
-    setDeviceBusy(true);
     setDeviceMessage("");
     setError("");
 
+    const id = deviceForm.id.trim();
+    const name = deviceForm.name.trim();
+    const roomName = deviceForm.roomName.trim();
+    const powerWatts = Number(deviceForm.powerWatts);
     const lifetimeValue = Number(deviceForm.lifetimeValue);
+
+    // Validate required fields
+    if (!id || !name || !roomName) {
+      setDeviceMessage("Error: Please fill in all required fields.");
+      return;
+    }
+
+    if (!Number.isFinite(powerWatts) || powerWatts <= 0) {
+      setDeviceMessage("Error: Power must be greater than zero.");
+      return;
+    }
+
+    if (
+      deviceForm.temporary &&
+      (!Number.isFinite(lifetimeValue) || lifetimeValue <= 0)
+    ) {
+      setDeviceMessage("Error: Lifetime must be greater than zero.");
+      return;
+    }
 
     const lifetimeSeconds = deviceForm.temporary
       ? lifetimeValue *
       (deviceForm.lifetimeUnit === "hours" ? 3600 : 60)
       : 0;
 
-    if (deviceForm.temporary && lifetimeValue <= 0) {
-      setDeviceMessage("Error: Lifetime must be greater than zero.");
-      setDeviceBusy(false);
-      return;
-    }
-
     const payload = {
-      id: deviceForm.id.trim(),
-      name: deviceForm.name.trim(),
+      id,
+      name,
       type: deviceForm.type,
-      roomName: deviceForm.roomName,
-      powerWatts: Number(deviceForm.powerWatts),
+      roomName,
+      powerWatts,
       temporary: deviceForm.temporary,
       lifetimeSeconds,
     };
+
+    setDeviceBusy(true);
 
     try {
       const response = await fetch(`${API_URL}/devices`, {
@@ -480,9 +499,7 @@ function App() {
         throw new Error(await getApiError(response));
       }
 
-      setDeviceMessage(
-        `"${payload.name}" added successfully!`
-      );
+      setDeviceMessage(`"${name}" added successfully!`);
 
       setDeviceForm({
         id: "",
@@ -503,6 +520,7 @@ function App() {
       setDeviceBusy(false);
     }
   };
+
 
   const bulkToggle = async (turnOn) => {
     const targets = filteredDevices.filter(
@@ -1470,7 +1488,9 @@ function App() {
                               </span>
                             </div>
 
+
                             <button
+                              type="button"
                               style={{
                                 ...(on ? styles.button : styles.primaryButton),
                                 width: "100%",
@@ -1480,26 +1500,27 @@ function App() {
                               disabled={busy}
                               onClick={() => updateDevicePower(device, !on)}
                             >
-
-                              <button
-                                style={{
-                                  ...styles.button,
-                                  background: "#7f1d1d",
-                                  marginTop: "8px",
-                                  width: "100%",
-                                }}
-                                disabled={busy || Boolean(deletingDevices[id])}
-                                onClick={() => deleteDevice(device)}
-                              >
-                                {deletingDevices[id] ? "Deleting..." : "Delete Device"}
-                              </button>
-
                               {busy
                                 ? "Updating..."
                                 : on
                                   ? "Turn OFF"
                                   : "Turn ON"}
                             </button>
+
+                            <button
+                              type="button"
+                              style={{
+                                ...styles.button,
+                                background: "#7f1d1d",
+                                marginTop: "8px",
+                                width: "100%",
+                              }}
+                              disabled={busy || Boolean(deletingDevices[id])}
+                              onClick={() => deleteDevice(device)}
+                            >
+                              {deletingDevices[id] ? "Deleting..." : "Delete Device"}
+                            </button>
+
                           </div>
                         );
                       })}

@@ -436,6 +436,74 @@ function App() {
     }
   };
 
+
+  const handleAddDevice = async (event) => {
+    event.preventDefault();
+
+    setDeviceBusy(true);
+    setDeviceMessage("");
+    setError("");
+
+    const lifetimeValue = Number(deviceForm.lifetimeValue);
+
+    const lifetimeSeconds = deviceForm.temporary
+      ? lifetimeValue *
+      (deviceForm.lifetimeUnit === "hours" ? 3600 : 60)
+      : 0;
+
+    if (deviceForm.temporary && lifetimeValue <= 0) {
+      setDeviceMessage("Error: Lifetime must be greater than zero.");
+      setDeviceBusy(false);
+      return;
+    }
+
+    const payload = {
+      id: deviceForm.id.trim(),
+      name: deviceForm.name.trim(),
+      type: deviceForm.type,
+      roomName: deviceForm.roomName,
+      powerWatts: Number(deviceForm.powerWatts),
+      temporary: deviceForm.temporary,
+      lifetimeSeconds,
+    };
+
+    try {
+      const response = await fetch(`${API_URL}/devices`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(await getApiError(response));
+      }
+
+      setDeviceMessage(
+        `"${payload.name}" added successfully!`
+      );
+
+      setDeviceForm({
+        id: "",
+        name: "",
+        type: "Light",
+        roomName: "",
+        powerWatts: "60",
+        temporary: true,
+        lifetimeValue: "30",
+        lifetimeUnit: "minutes",
+      });
+
+      await loadDashboard(false);
+      await loadEnergySessions();
+    } catch (err) {
+      setDeviceMessage(`Error adding device: ${err.message}`);
+    } finally {
+      setDeviceBusy(false);
+    }
+  };
+
   const bulkToggle = async (turnOn) => {
     const targets = filteredDevices.filter(
       (device) => isDeviceOn(device) !== turnOn

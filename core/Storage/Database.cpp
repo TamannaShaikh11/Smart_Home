@@ -3,7 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 
-Database::Database(const std::string& filename)
+Database::Database(const std::string &filename)
     : db(nullptr)
 {
     int result = sqlite3_open(filename.c_str(), &db);
@@ -20,8 +20,7 @@ Database::Database(const std::string& filename)
         }
 
         throw std::runtime_error(
-            "Failed to open database: " + error
-        );
+            "Failed to open database: " + error);
     }
 
     std::cout << "SQLite database connected successfully.\n";
@@ -33,13 +32,12 @@ Database::~Database()
         sqlite3_close(db);
 }
 
-bool Database::execute(const std::string& sql)
+bool Database::execute(const std::string &sql)
 {
-    char* errorMessage = nullptr;
+    char *errorMessage = nullptr;
 
     int result = sqlite3_exec(
-        db, sql.c_str(), nullptr, nullptr, &errorMessage
-    );
+        db, sql.c_str(), nullptr, nullptr, &errorMessage);
 
     if (result != SQLITE_OK)
     {
@@ -59,13 +57,13 @@ bool Database::initializeSchema()
     if (!execute("PRAGMA foreign_keys = ON;"))
         return false;
 
-    const char* roomsSql = R"(
+    const char *roomsSql = R"(
         CREATE TABLE IF NOT EXISTS rooms (
             name TEXT PRIMARY KEY
         );
     )";
 
-    const char* devicesSql = R"(
+    const char *devicesSql = R"(
         CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -81,15 +79,42 @@ bool Database::initializeSchema()
         );
     )";
 
-    return execute(roomsSql) && execute(devicesSql);
+    if (!execute(roomsSql) || !execute(devicesSql))
+        return false;
+
+    const char *profilesSql = R"(
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL
+    );
+)";
+
+    const char *preferencesSql = R"(
+    CREATE TABLE IF NOT EXISTS user_preferences (
+        user_id TEXT NOT NULL,
+        room_name TEXT NOT NULL,
+        ac_temperature INTEGER NOT NULL DEFAULT -1,
+        heater_temperature INTEGER NOT NULL DEFAULT -1,
+        fan_speed INTEGER NOT NULL DEFAULT -1,
+        light_on INTEGER NOT NULL DEFAULT -1,
+
+        PRIMARY KEY (user_id, room_name),
+
+        FOREIGN KEY (user_id)
+            REFERENCES user_profiles(id)
+            ON DELETE CASCADE
+    );
+)";
+
+    return execute(profilesSql) && execute(preferencesSql);
 }
 
-bool Database::saveRoom(const std::string& roomName)
+bool Database::saveRoom(const std::string &roomName)
 {
-    const char* sql =
+    const char *sql =
         "INSERT OR IGNORE INTO rooms (name) VALUES (?);";
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
@@ -99,8 +124,7 @@ bool Database::saveRoom(const std::string& roomName)
     }
 
     sqlite3_bind_text(
-        stmt, 1, roomName.c_str(), -1, SQLITE_TRANSIENT
-    );
+        stmt, 1, roomName.c_str(), -1, SQLITE_TRANSIENT);
 
     int result = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -115,9 +139,9 @@ bool Database::saveRoom(const std::string& roomName)
     return true;
 }
 
-bool Database::saveDevice(const DeviceRecord& device)
+bool Database::saveDevice(const DeviceRecord &device)
 {
-    const char* sql = R"(
+    const char *sql = R"(
         INSERT OR REPLACE INTO devices (
             id, name, device_type, room_name,
             status, power_watts, setting, runtime_minutes,
@@ -125,7 +149,7 @@ bool Database::saveDevice(const DeviceRecord& device)
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     )";
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
@@ -158,9 +182,9 @@ bool Database::saveDevice(const DeviceRecord& device)
     return true;
 }
 
-bool Database::updateDevice(const DeviceRecord& device)
+bool Database::updateDevice(const DeviceRecord &device)
 {
-    const char* sql = R"(
+    const char *sql = R"(
         UPDATE devices SET
             name = ?,
             device_type = ?,
@@ -174,7 +198,7 @@ bool Database::updateDevice(const DeviceRecord& device)
         WHERE id = ?;
     )";
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
@@ -208,13 +232,12 @@ bool Database::updateDevice(const DeviceRecord& device)
     return changed > 0;
 }
 
-
-bool Database::deleteDevice(const std::string& deviceId)
+bool Database::deleteDevice(const std::string &deviceId)
 {
-    const char* sql =
+    const char *sql =
         "DELETE FROM devices WHERE id = ?;";
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(
             db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -229,8 +252,7 @@ bool Database::deleteDevice(const std::string& deviceId)
         1,
         deviceId.c_str(),
         -1,
-        SQLITE_TRANSIENT
-    );
+        SQLITE_TRANSIENT);
 
     if (bindResult != SQLITE_OK)
     {
@@ -262,8 +284,8 @@ bool Database::deleteDevice(const std::string& deviceId)
 std::vector<std::string> Database::loadRooms()
 {
     std::vector<std::string> rooms;
-    const char* sql = "SELECT name FROM rooms ORDER BY name;";
-    sqlite3_stmt* stmt = nullptr;
+    const char *sql = "SELECT name FROM rooms ORDER BY name;";
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
@@ -274,12 +296,11 @@ std::vector<std::string> Database::loadRooms()
 
     while (sqlite3_step(stmt) == SQLITE_ROW)
     {
-        const unsigned char* value = sqlite3_column_text(stmt, 0);
+        const unsigned char *value = sqlite3_column_text(stmt, 0);
 
         if (value != nullptr)
             rooms.emplace_back(
-                reinterpret_cast<const char*>(value)
-            );
+                reinterpret_cast<const char *>(value));
     }
 
     sqlite3_finalize(stmt);
@@ -290,7 +311,7 @@ std::vector<DeviceRecord> Database::loadDevices()
 {
     std::vector<DeviceRecord> devices;
 
-    const char* sql = R"(
+    const char *sql = R"(
         SELECT id, name, device_type, room_name,
                status, power_watts, setting, runtime_minutes,
                lifetime, expiry_time
@@ -298,7 +319,7 @@ std::vector<DeviceRecord> Database::loadDevices()
         ORDER BY id;
     )";
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
     {
@@ -313,12 +334,12 @@ std::vector<DeviceRecord> Database::loadDevices()
 
         auto readText = [stmt](int column) -> std::string
         {
-            const unsigned char* value =
+            const unsigned char *value =
                 sqlite3_column_text(stmt, column);
 
             return value
-                ? reinterpret_cast<const char*>(value)
-                : "";
+                       ? reinterpret_cast<const char *>(value)
+                       : "";
         };
 
         device.id = readText(0);
@@ -339,15 +360,14 @@ std::vector<DeviceRecord> Database::loadDevices()
     return devices;
 }
 
-sqlite3* Database::getConnection() const
+sqlite3 *Database::getConnection() const
 {
     return db;
 }
 
-
 bool Database::renameRoom(
-    const std::string& oldName,
-    const std::string& newName)
+    const std::string &oldName,
+    const std::string &newName)
 {
     if (oldName.empty() || newName.empty())
         return false;
@@ -359,11 +379,11 @@ bool Database::renameRoom(
         return false;
 
     auto runUpdate = [this](
-        const char* sql,
-        const std::string& first,
-        const std::string& second) -> bool
+                         const char *sql,
+                         const std::string &first,
+                         const std::string &second) -> bool
     {
-        sqlite3_stmt* stmt = nullptr;
+        sqlite3_stmt *stmt = nullptr;
 
         if (sqlite3_prepare_v2(
                 db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -412,12 +432,12 @@ bool Database::renameRoom(
     return success;
 }
 
-bool Database::deleteRoom(const std::string& roomName)
+bool Database::deleteRoom(const std::string &roomName)
 {
     if (roomName.empty())
         return false;
 
-    sqlite3_stmt* stmt = nullptr;
+    sqlite3_stmt *stmt = nullptr;
 
     if (sqlite3_prepare_v2(
             db,
@@ -441,4 +461,218 @@ bool Database::deleteRoom(const std::string& roomName)
     sqlite3_finalize(stmt);
 
     return success && changed > 0;
+}
+
+bool Database::createProfile(const UserProfile& profile)
+{
+    if (profile.id.empty() || profile.displayName.empty())
+        return false;
+
+    const char* sql =
+        "INSERT INTO user_profiles (id, display_name) "
+        "VALUES (?, ?);";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr)
+        != SQLITE_OK)
+    {
+        std::cerr << "Prepare profile failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+
+    sqlite3_bind_text(
+        stmt, 1, profile.id.c_str(), -1, SQLITE_TRANSIENT);
+
+    sqlite3_bind_text(
+        stmt, 2, profile.displayName.c_str(),
+        -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Create profile failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+
+    return true;
+}
+
+bool Database::profileExists(const std::string& userId)
+{
+    const char* sql =
+        "SELECT 1 FROM user_profiles WHERE id = ? LIMIT 1;";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr)
+        != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(
+        stmt, 1, userId.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return result == SQLITE_ROW;
+}
+
+std::vector<UserProfile> Database::loadProfiles()
+{
+    std::vector<UserProfile> profiles;
+
+    const char* sql =
+        "SELECT id, display_name "
+        "FROM user_profiles ORDER BY display_name;";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr)
+        != SQLITE_OK)
+    {
+        std::cerr << "Load profiles failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return profiles;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        UserProfile profile;
+
+        const unsigned char* id =
+            sqlite3_column_text(stmt, 0);
+
+        const unsigned char* name =
+            sqlite3_column_text(stmt, 1);
+
+        if (id)
+            profile.id =
+                reinterpret_cast<const char*>(id);
+
+        if (name)
+            profile.displayName =
+                reinterpret_cast<const char*>(name);
+
+        profiles.push_back(profile);
+    }
+
+    sqlite3_finalize(stmt);
+    return profiles;
+}
+
+bool Database::savePreferences(
+    const UserPreferenceRecord& preferences)
+{
+    if (preferences.userId.empty() ||
+        preferences.roomName.empty() ||
+        !profileExists(preferences.userId))
+        return false;
+
+    const char* sql = R"(
+        INSERT INTO user_preferences (
+            user_id, room_name,
+            ac_temperature, heater_temperature,
+            fan_speed, light_on
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, room_name)
+        DO UPDATE SET
+            ac_temperature = excluded.ac_temperature,
+            heater_temperature = excluded.heater_temperature,
+            fan_speed = excluded.fan_speed,
+            light_on = excluded.light_on;
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr)
+        != SQLITE_OK)
+    {
+        std::cerr << "Prepare preferences failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+
+    sqlite3_bind_text(
+        stmt, 1, preferences.userId.c_str(),
+        -1, SQLITE_TRANSIENT);
+
+    sqlite3_bind_text(
+        stmt, 2, preferences.roomName.c_str(),
+        -1, SQLITE_TRANSIENT);
+
+    sqlite3_bind_int(stmt, 3, preferences.acTemperature);
+    sqlite3_bind_int(stmt, 4, preferences.heaterTemperature);
+    sqlite3_bind_int(stmt, 5, preferences.fanSpeed);
+    sqlite3_bind_int(stmt, 6, preferences.lightOn);
+
+    const int result = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save preferences failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+
+    return true;
+}
+
+bool Database::loadPreferences(
+    const std::string& userId,
+    const std::string& roomName,
+    UserPreferenceRecord& preferences)
+{
+    const char* sql = R"(
+        SELECT ac_temperature, heater_temperature,
+               fan_speed, light_on
+        FROM user_preferences
+        WHERE user_id = ? AND room_name = ?;
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr)
+        != SQLITE_OK)
+    {
+        std::cerr << "Prepare preference load failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+
+    sqlite3_bind_text(
+        stmt, 1, userId.c_str(), -1, SQLITE_TRANSIENT);
+
+    sqlite3_bind_text(
+        stmt, 2, roomName.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(stmt);
+
+    if (result == SQLITE_ROW)
+    {
+        preferences.userId = userId;
+        preferences.roomName = roomName;
+
+        preferences.acTemperature =
+            sqlite3_column_int(stmt, 0);
+
+        preferences.heaterTemperature =
+            sqlite3_column_int(stmt, 1);
+
+        preferences.fanSpeed =
+            sqlite3_column_int(stmt, 2);
+
+        preferences.lightOn =
+            sqlite3_column_int(stmt, 3);
+    }
+
+    sqlite3_finalize(stmt);
+
+    return result == SQLITE_ROW;
 }

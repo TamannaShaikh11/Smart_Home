@@ -2821,7 +2821,9 @@ int main()
                           {"acTemperature", preferences.acTemperature},
                           {"heaterTemperature", preferences.heaterTemperature},
                           {"fanSpeed", preferences.fanSpeed},
-                          {"lightOn", preferences.lightOn}})
+                          {"lightOn", preferences.lightOn},
+                          {"automaticApplyEnabled", preferences.automaticApplyEnabled},
+                          {"firstApplicationConfirmed", preferences.firstApplicationConfirmed}})
                         .dump(),
                     "application/json");
             });
@@ -2890,6 +2892,19 @@ int main()
                             "application/json");
                         return;
                     }
+                    if (body.contains("automaticApplyEnabled"))
+                    {
+                        if (!body["automaticApplyEnabled"].is_boolean())
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                R"({"error":"automaticApplyEnabled must be a boolean."})",
+                                "application/json");
+                            return;
+                        }
+                        preferences.automaticApplyEnabled =
+                            body["automaticApplyEnabled"].get<bool>();
+                    }
 
                     if (preferences.roomName.empty() ||
                         (preferences.acTemperature != -1 &&
@@ -2947,6 +2962,17 @@ int main()
                         return;
                     }
 
+                    UserPreferenceRecord savedPreferences;
+                    if (!home.getUserPreferences(
+                            userId, preferences.roomName, savedPreferences))
+                    {
+                        res.status = 500;
+                        res.set_content(
+                            R"({"error":"Preferences were saved but could not be reloaded."})",
+                            "application/json");
+                        return;
+                    }
+
                     res.set_content(
                         json({{"message", "Preferences saved successfully."},
                               {"userId", preferences.userId},
@@ -2954,7 +2980,9 @@ int main()
                               {"acTemperature", preferences.acTemperature},
                               {"heaterTemperature", preferences.heaterTemperature},
                               {"fanSpeed", preferences.fanSpeed},
-                              {"lightOn", preferences.lightOn}})
+                              {"lightOn", preferences.lightOn},
+                              {"automaticApplyEnabled", savedPreferences.automaticApplyEnabled},
+                              {"firstApplicationConfirmed", savedPreferences.firstApplicationConfirmed}})
                             .dump(),
                         "application/json");
                 }
@@ -2991,6 +3019,20 @@ int main()
 
             const std::string roomName =
                 body["roomName"].get<std::string>();
+
+            const bool automatic =
+                body.contains("automatic") && body["automatic"].is_boolean()
+                    ? body["automatic"].get<bool>()
+                    : false;
+            if (body.contains("automatic") &&
+                !body["automatic"].is_boolean())
+            {
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"automatic must be a boolean."})",
+                    "application/json");
+                return;
+            }
 
             if (!home.roomExists(roomName))
             {
@@ -3030,6 +3072,39 @@ int main()
                 res.status = 400;
                 res.set_content(
                     R"({"error":"Saved preference values are invalid and cannot be applied."})",
+                    "application/json");
+                return;
+            }
+
+            if (automatic &&
+                (!preferences.automaticApplyEnabled ||
+                 !preferences.firstApplicationConfirmed))
+            {
+                res.status = 403;
+                res.set_content(
+                    R"({"error":"Automatic application is not enabled and confirmed for this profile and room."})",
+                    "application/json");
+                return;
+            }
+            if (automatic && !body.contains("automationSessionId"))
+            {
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"Automatic application requires a current room recognition session."})",
+                    "application/json");
+                return;
+            }
+            const bool needsFirstApplicationConfirmation =
+                preferences.automaticApplyEnabled &&
+                !preferences.firstApplicationConfirmed;
+            if (needsFirstApplicationConfirmation &&
+                (!body.contains("confirmed") ||
+                 !body["confirmed"].is_boolean() ||
+                 !body["confirmed"].get<bool>()))
+            {
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"Explicit confirmation is required for the first automatic-application setup."})",
                     "application/json");
                 return;
             }
@@ -3118,6 +3193,21 @@ int main()
                 {
                     return action.value("status", "") == "applied";
                 });
+
+            if (allApplied &&
+                needsFirstApplicationConfirmation &&
+                !home.confirmUserPreferenceAutomation(userId, roomName))
+            {
+                res.status = 500;
+                res.set_content(
+                    json({
+                        {"error", "Devices were applied, but the first-application confirmation could not be persisted."},
+                        {"success", true},
+                        {"actions", actions},
+                        {"eventPersisted", false}}).dump(),
+                    "application/json");
+                return;
+            }
 
             if (!automationEnrollmentId.empty())
             {
@@ -3243,6 +3333,135 @@ int main()
             });
 
         server.Get(
+            "/api/automation/room-settings",
+            [&home](const httplib::Request &req, httplib::Response &res)
+            {
+                if (!req.has_param("roomName"))
+                {
+                    json result = json::array();
+                    for (const std::string &roomName : home.getRoomNames())
+                    {
+                        RoomAutomationSettings settings;
+                        if (!home.getRoomAutomationSettings(roomName, settings))
+                        {
+                            res.status = 500;
+                            res.set_content(
+                                R"({"error":"Could not load room automation settings."})",
+                                "application/json");
+                            return;
+                        }
+                        result.push_back({
+                            {"roomName", settings.roomName},
+                            {"cameraEnabled", settings.cameraEnabled}});
+                    }
+                    res.set_content(result.dump(), "application/json");
+                    return;
+                }
+                if (req.get_param_value("roomName").empty())
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"roomName query parameter cannot be empty."})",
+                        "application/json");
+                    return;
+                }
+                const std::string roomName = req.get_param_value("roomName");
+                if (!home.roomExists(roomName))
+                {
+                    res.status = 404;
+                    res.set_content(
+                        R"({"error":"Room not found."})",
+                        "application/json");
+                    return;
+                }
+                RoomAutomationSettings settings;
+                if (!home.getRoomAutomationSettings(
+                        roomName, settings))
+                {
+                    res.status = 500;
+                    res.set_content(
+                        R"({"error":"Could not load room automation settings."})",
+                        "application/json");
+                    return;
+                }
+                res.set_content(
+                    json({
+                        {"roomName", settings.roomName},
+                        {"cameraEnabled", settings.cameraEnabled}})
+                        .dump(),
+                    "application/json");
+            });
+
+        server.Put(
+            "/api/automation/room-settings",
+            [&home, &automationRegistry](
+                const httplib::Request &req, httplib::Response &res)
+            {
+                try
+                {
+                    const json body = json::parse(req.body);
+                    if (!body.contains("roomName") ||
+                        !body["roomName"].is_string() ||
+                        body["roomName"].get<std::string>().empty() ||
+                        !body.contains("cameraEnabled") ||
+                        !body["cameraEnabled"].is_boolean())
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"roomName and boolean cameraEnabled are required."})",
+                            "application/json");
+                        return;
+                    }
+                    RoomAutomationSettings settings{
+                        body["roomName"].get<std::string>(),
+                        body["cameraEnabled"].get<bool>()};
+                    if (!home.roomExists(settings.roomName))
+                    {
+                        res.status = 404;
+                        res.set_content(
+                            R"({"error":"Room not found."})",
+                            "application/json");
+                        return;
+                    }
+                    std::lock_guard<std::mutex> lock(
+                        automationRegistry.mutex);
+                    if (!home.saveRoomAutomationSettings(settings))
+                    {
+                        res.status = 500;
+                        res.set_content(
+                            R"({"error":"Could not persist room automation settings."})",
+                            "application/json");
+                        return;
+                    }
+                    if (!settings.cameraEnabled &&
+                        !automationRegistry.activeSessionId.empty())
+                    {
+                        const auto session = automationRegistry.sessions.find(
+                            automationRegistry.activeSessionId);
+                        if (session != automationRegistry.sessions.end() &&
+                            session->second.roomName == settings.roomName)
+                        {
+                            automationRegistry.sessions.erase(session);
+                            automationRegistry.activeSessionId.clear();
+                        }
+                    }
+                    res.set_content(
+                        json({
+                            {"roomName", settings.roomName},
+                            {"cameraEnabled", settings.cameraEnabled}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::exception &error)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                }
+            });
+
+        server.Get(
             "/api/automation/enrollments",
             [&home](const httplib::Request &, httplib::Response &res)
             {
@@ -3304,6 +3523,22 @@ int main()
                         res.status = 409;
                         res.set_content(
                             R"({"error":"Stop room recognition before changing enrollments."})",
+                            "application/json");
+                        return;
+                    }
+                    const auto existingEnrollments =
+                        home.getAutomationEnrollments();
+                    if (std::any_of(
+                            existingEnrollments.begin(),
+                            existingEnrollments.end(),
+                            [&profileId](const AutomationEnrollmentRecord &item)
+                            {
+                                return item.profileId == profileId;
+                            }))
+                    {
+                        res.status = 409;
+                        res.set_content(
+                            R"({"error":"This profile already has an enrollment. Delete it before re-enrolling."})",
                             "application/json");
                         return;
                     }
@@ -3462,6 +3697,24 @@ int main()
                             "application/json");
                         return;
                     }
+                    RoomAutomationSettings roomSettings;
+                    if (!home.getRoomAutomationSettings(
+                            roomName, roomSettings))
+                    {
+                        res.status = 500;
+                        res.set_content(
+                            R"({"error":"Could not load room automation settings."})",
+                            "application/json");
+                        return;
+                    }
+                    if (!roomSettings.cameraEnabled)
+                    {
+                        res.status = 403;
+                        res.set_content(
+                            R"({"error":"Camera monitoring is disabled for this room."})",
+                            "application/json");
+                        return;
+                    }
                     if (!automationRegistry.activeSessionId.empty())
                     {
                         auto active = automationRegistry.sessions.find(
@@ -3586,7 +3839,7 @@ int main()
                     const std::string status =
                         body["status"].get<std::string>();
                     const std::set<std::string> allowed{
-                        "pending", "matched", "unknown", "ambiguous",
+                        "pending", "matched", "unknown", "uncertain", "ambiguous",
                         "no_person", "failed"};
                     if (allowed.count(status) == 0)
                     {
@@ -3742,7 +3995,11 @@ int main()
                                         {"acTemperature", found->second.preferences.acTemperature},
                                         {"heaterTemperature", found->second.preferences.heaterTemperature},
                                         {"fanSpeed", found->second.preferences.fanSpeed},
-                                        {"lightOn", found->second.preferences.lightOn}}},
+                                        {"lightOn", found->second.preferences.lightOn},
+                                        {"automaticApplyEnabled", found->second.preferences.automaticApplyEnabled},
+                                        {"firstApplicationConfirmed", found->second.preferences.firstApplicationConfirmed}}},
+                                    {"automaticApplyEnabled", found->second.preferences.automaticApplyEnabled},
+                                    {"firstApplicationConfirmed", found->second.preferences.firstApplicationConfirmed},
                                     {"preview", found->second.preview},
                                     {"alreadyApplied", found->second.appliedEnrollments.count(enrollmentId) != 0}})
                                     .dump(),
@@ -3842,7 +4099,11 @@ int main()
                                 {"acTemperature", preferences.acTemperature},
                                 {"heaterTemperature", preferences.heaterTemperature},
                                 {"fanSpeed", preferences.fanSpeed},
-                                {"lightOn", preferences.lightOn}}},
+                                {"lightOn", preferences.lightOn},
+                                {"automaticApplyEnabled", preferences.automaticApplyEnabled},
+                                {"firstApplicationConfirmed", preferences.firstApplicationConfirmed}}},
+                            {"automaticApplyEnabled", preferences.automaticApplyEnabled},
+                            {"firstApplicationConfirmed", preferences.firstApplicationConfirmed},
                             {"preview", preview},
                             {"alreadyApplied", false}})
                             .dump(),

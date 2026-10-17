@@ -94,6 +94,14 @@ public:
         const std::string &userId,
         const std::string &roomName,
         UserPreferenceRecord &preferences) const;
+    bool confirmUserPreferenceAutomation(
+        const std::string &userId,
+        const std::string &roomName);
+    bool getRoomAutomationSettings(
+        const std::string &roomName,
+        RoomAutomationSettings &settings) const;
+    bool saveRoomAutomationSettings(
+        const RoomAutomationSettings &settings);
 
     bool addAutomationEnrollment(
         const AutomationEnrollmentRecord &enrollment);

@@ -1100,6 +1100,45 @@ bool SmartHome::getUserPreferences(
     );
 }
 
+bool SmartHome::confirmUserPreferenceAutomation(
+    const std::string &userId,
+    const std::string &roomName)
+{
+    if (userId.empty() || roomName.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+    if (findRoom(roomName) == nullptr ||
+        !database.profileExists(userId))
+        return false;
+    return database.confirmPreferenceAutomation(userId, roomName);
+}
+
+bool SmartHome::getRoomAutomationSettings(
+    const std::string &roomName,
+    RoomAutomationSettings &settings) const
+{
+    if (roomName.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+    if (findRoom(roomName) == nullptr)
+        return false;
+    return database.loadRoomAutomationSettings(roomName, settings);
+}
+
+bool SmartHome::saveRoomAutomationSettings(
+    const RoomAutomationSettings &settings)
+{
+    if (settings.roomName.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+    if (findRoom(settings.roomName) == nullptr)
+        return false;
+    return database.saveRoomAutomationSettings(settings);
+}
+
 bool SmartHome::addAutomationEnrollment(
     const AutomationEnrollmentRecord &enrollment)
 {

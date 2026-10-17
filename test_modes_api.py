@@ -666,7 +666,7 @@ class ModesApiTest(unittest.TestCase):
         database = sqlite3.connect(
             f"file:{self.database_dir / 'smarthome.db'}?mode=ro", uri=True
         )
-        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
         for table, original_count in self.baseline_counts.items():
             self.assertEqual(
                 database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],

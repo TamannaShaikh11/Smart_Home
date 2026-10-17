@@ -83,6 +83,13 @@ class FaceAutomationServiceTest(unittest.TestCase):
             raise AssertionError("Could not create a synthetic blank image.")
         return base64.b64encode(encoded.tobytes()).decode("ascii")
 
+    @staticmethod
+    def good_quality_face():
+        rows, columns = np.indices((128, 128))
+        return (((rows // 8 + columns // 8) % 2) * 180 + 30).astype(
+            np.uint8
+        )
+
     def test_health_and_enrollment_listing_are_local_metadata_only(self):
         status, payload = self.request("GET", "/health")
         self.assertEqual(status, 200)
@@ -130,8 +137,8 @@ class FaceAutomationServiceTest(unittest.TestCase):
             matcher,
             "_faces",
             return_value=[
-                np.zeros((128, 128), dtype=np.uint8),
-                np.zeros((128, 128), dtype=np.uint8),
+                self.good_quality_face(),
+                self.good_quality_face(),
             ],
         ):
             result = matcher.recognize(
@@ -160,16 +167,33 @@ class FaceAutomationServiceTest(unittest.TestCase):
             "_faces",
             return_value=[np.zeros((128, 128), dtype=np.uint8)],
         ):
-            result = matcher.recognize(
+            poor_quality = matcher.recognize(
                 "room_session_789", "Kitchen", self.encoded_blank_frame()
             )
-        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(poor_quality["status"], "uncertain")
+        self.assertEqual(poor_quality["reason"], "poor_quality")
+
+        with patch.object(
+            matcher,
+            "_faces",
+            return_value=[self.good_quality_face()],
+        ):
+            unknown_results = [
+                matcher.recognize(
+                    "room_session_789", "Kitchen", self.encoded_blank_frame()
+                )
+                for _ in range(3)
+            ]
+        self.assertEqual(
+            [item["status"] for item in unknown_results],
+            ["uncertain", "uncertain", "unknown"],
+        )
 
         matcher.recognizer.predict.return_value = (1, face_service.MATCH_THRESHOLD)
         with patch.object(
             matcher,
             "_faces",
-            return_value=[np.zeros((128, 128), dtype=np.uint8)],
+            return_value=[self.good_quality_face()],
         ):
             results = [
                 matcher.recognize(
@@ -185,6 +209,33 @@ class FaceAutomationServiceTest(unittest.TestCase):
             results[-1]["enrollmentId"],
             "face_enroll_1234",
         )
+        with self.assertRaises(RuntimeError):
+            matcher.enroll("face_enroll_1234", "Consenting Member", [""] * 8)
+
+    def test_poor_lighting_blur_and_consent_sample_quality_are_rejected(self):
+        matcher = face_service.MATCHER
+        matcher.start_session("room_session_quality", "Study")
+        with patch.object(
+            matcher,
+            "_faces",
+            return_value=[np.zeros((128, 128), dtype=np.uint8)],
+        ):
+            result = matcher.recognize(
+                "room_session_quality", "Study", self.encoded_blank_frame()
+            )
+        self.assertEqual(result["status"], "uncertain")
+        self.assertEqual(result["reason"], "poor_quality")
+        with patch.object(
+            matcher,
+            "_faces",
+            return_value=[np.zeros((128, 128), dtype=np.uint8)],
+        ):
+            with self.assertRaisesRegex(ValueError, "too dark"):
+                matcher.enroll(
+                    "face_enroll_quality",
+                    "Consenting Member",
+                    [self.encoded_blank_frame()] * 8,
+                )
 
     def test_dpapi_protects_and_unprotects_bytes_on_this_windows_account(self):
         secret = b"test-only synthetic face-template marker"

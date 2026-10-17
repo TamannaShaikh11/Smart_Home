@@ -29,6 +29,8 @@ const EMPTY_PREFERENCES = {
   heaterTemperature: -1,
   fanSpeed: -1,
   lightOn: -1,
+  automaticApplyEnabled: false,
+  firstApplicationConfirmed: false,
 };
 
 function getRoomLabel(room) {
@@ -260,9 +262,19 @@ function App() {
       setCameraError("Select one room before starting recognition.");
       return;
     }
+    if (roomCameraSettingsRoom !== selectedRoom) {
+      setCameraStatus("error");
+      setCameraError("Wait for this room's camera settings to load before starting recognition.");
+      return;
+    }
     if (!automationEnabled) {
       setCameraStatus("error");
       setCameraError("Enable camera automation before starting recognition.");
+      return;
+    }
+    if (!roomCameraEnabled) {
+      setCameraStatus("error");
+      setCameraError("Enable camera monitoring for this room before starting recognition.");
       return;
     }
     const requestId = cameraRequestId.current + 1;
@@ -312,6 +324,7 @@ function App() {
         enrollmentId: "",
       });
       setAutomationPreview(null);
+      setAutomationApplyResult(null);
       handledEnrollmentRef.current = "";
     } catch (err) {
       if (cameraRequestId.current !== requestId) return;
@@ -416,6 +429,9 @@ function App() {
   const [assistantError, setAssistantError] = useState("");
   const [roomOperatingMode, setRoomOperatingMode] = useState("manual");
   const [automationEnabled, setAutomationEnabled] = useState(false);
+  const [roomCameraEnabled, setRoomCameraEnabled] = useState(false);
+  const [roomCameraSettingsRoom, setRoomCameraSettingsRoom] = useState("");
+  const [roomCameraSettingsBusy, setRoomCameraSettingsBusy] = useState(false);
   const [automationStatus, setAutomationStatus] = useState("checking");
   const [automationError, setAutomationError] = useState("");
   const [automationBusy, setAutomationBusy] = useState(false);
@@ -437,14 +453,22 @@ function App() {
   const [cameraStatus, setCameraStatus] = useState("disabled");
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraStarting, setCameraStarting] = useState(false);
-  const setCameraError = setAutomationError;
+  const setCameraError = useCallback(
+    (message) => setAutomationError(message),
+    []
+  );
   const cameraVideoRef = useRef(null);
   const cameraStreamRef = useRef(null);
+  const startCameraRef = useRef(null);
+  startCameraRef.current = startCamera;
   const cameraSessionRef = useRef(null);
   const stopCameraRef = useRef(null);
   const cameraRequestId = useRef(0);
   const recognitionIntervalRef = useRef(null);
   const handledEnrollmentRef = useRef("");
+  const automaticApplyAttemptRef = useRef("");
+  const manualCameraOverrideRef = useRef(false);
+  const cameraAutoStartAttemptRef = useRef("");
 
   useEffect(() => {
     const video = cameraVideoRef.current;
@@ -507,6 +531,76 @@ function App() {
     };
   }, [fetchJson]);
 
+  useEffect(() => {
+    let active = true;
+    const checkFaceService = async () => {
+      try {
+        await fetchFaceJson("/health");
+        if (active) setAutomationStatus("online");
+      } catch {
+        if (active) setAutomationStatus("offline");
+      }
+    };
+    void checkFaceService();
+    const interval = window.setInterval(checkFaceService, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setRoomCameraEnabled(false);
+    setRoomCameraSettingsRoom("");
+    if (!selectedRoom || selectedRoom === "All Rooms") {
+      setRoomCameraSettingsBusy(false);
+      return () => { active = false; };
+    }
+    setRoomCameraSettingsBusy(true);
+    fetchJson(
+      `${API_URL}/automation/room-settings?roomName=${encodeURIComponent(selectedRoom)}`
+    )
+      .then((settings) => {
+        if (active) {
+          setRoomCameraEnabled(Boolean(settings.cameraEnabled));
+          setRoomCameraSettingsRoom(selectedRoom);
+        }
+      })
+      .catch((err) => {
+        if (active)
+          setAutomationError(
+            `Could not load ${selectedRoom} camera settings: ${err.message}`
+          );
+      })
+      .finally(() => {
+        if (active) setRoomCameraSettingsBusy(false);
+      });
+    return () => { active = false; };
+  }, [selectedRoom, fetchJson]);
+
+  useEffect(() => {
+    if (activeSection !== "devices" ||
+        !selectedRoom || selectedRoom === "All Rooms" ||
+        roomCameraSettingsRoom !== selectedRoom ||
+        !roomCameraEnabled || !automationEnabled ||
+        automationStatus !== "online" || manualCameraOverrideRef.current ||
+        cameraSessionRef.current || cameraStarting ||
+        cameraAutoStartAttemptRef.current === selectedRoom)
+      return;
+    cameraAutoStartAttemptRef.current = selectedRoom;
+    setRoomOperatingMode("camera");
+    void startCameraRef.current?.();
+  }, [
+    activeSection,
+    automationEnabled,
+    automationStatus,
+    cameraStarting,
+    roomCameraEnabled,
+    roomCameraSettingsRoom,
+    selectedRoom,
+  ]);
+
   const loadProfiles = useCallback(async () => {
     setProfilesLoading(true);
     try {
@@ -545,6 +639,7 @@ function App() {
         body: JSON.stringify({ enabled }),
       });
       setAutomationEnabled(result.enabled);
+      if (enabled) cameraAutoStartAttemptRef.current = "";
       try {
         await fetchFaceJson("/health");
         setAutomationStatus("online");
@@ -559,6 +654,30 @@ function App() {
       setAutomationError(`Could not update automation setting: ${err.message}`);
     } finally {
       setAutomationBusy(false);
+    }
+  };
+
+  const updateRoomCameraEnabled = async (enabled) => {
+    if (!selectedRoom || selectedRoom === "All Rooms") return;
+    setRoomCameraSettingsBusy(true);
+    setAutomationError("");
+    try {
+      if (!enabled && cameraSessionRef.current)
+        await stopCamera();
+      const settings = await fetchJson(`${API_URL}/automation/room-settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomName: selectedRoom, cameraEnabled: enabled }),
+      });
+      setRoomCameraEnabled(Boolean(settings.cameraEnabled));
+      setRoomCameraSettingsRoom(selectedRoom);
+      if (enabled) cameraAutoStartAttemptRef.current = "";
+    } catch (err) {
+      setAutomationError(
+        `Could not update ${selectedRoom} camera setting: ${err.message}`
+      );
+    } finally {
+      setRoomCameraSettingsBusy(false);
     }
   };
 
@@ -681,24 +800,31 @@ function App() {
     }
   };
 
-  const applyAutomationPreview = async () => {
-    if (!automationSession || !automationPreview ||
+  const applyAutomationPreview = async (
+    plan = automationPreview,
+    session = automationSession,
+    automatic = false
+  ) => {
+    if (!session || !plan ||
         recognition.status !== "matched" ||
-        recognition.enrollmentId !== automationPreview.enrollmentId ||
+        recognition.enrollmentId !== plan.enrollmentId ||
+        (automatic &&
+          (!plan.automaticApplyEnabled || !plan.firstApplicationConfirmed)) ||
         automationApplyResult?.success === true)
       return;
     setAutomationBusy(true);
     setAutomationError("");
     try {
       const result = await fetchJson(
-        `${API_URL}/profiles/${encodeURIComponent(automationPreview.profileId)}/preferences/apply`,
+        `${API_URL}/profiles/${encodeURIComponent(plan.profileId)}/preferences/apply`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            roomName: automationSession.roomName,
-            automationSessionId: automationSession.sessionId,
+            roomName: session.roomName,
+            automationSessionId: session.sessionId,
             confirmed: true,
+            automatic,
           }),
         }
       );
@@ -710,11 +836,39 @@ function App() {
         loadEnergySummary(),
       ]);
     } catch (err) {
-      setAutomationError(`Could not apply the confirmed room preferences: ${err.message}`);
+      setAutomationError(
+        `Could not ${automatic ? "automatically apply" : "apply the confirmed"} room preferences: ${err.message}`
+      );
     } finally {
       setAutomationBusy(false);
     }
   };
+
+  const applyAutomationPreviewRef = useRef(null);
+  applyAutomationPreviewRef.current = applyAutomationPreview;
+
+  useEffect(() => {
+    if (!automationSession || !cameraStream ||
+        recognition.status !== "matched" ||
+        recognition.enrollmentId !== automationPreview?.enrollmentId ||
+        !automationPreview?.automaticApplyEnabled ||
+        !automationPreview?.firstApplicationConfirmed)
+      return;
+    const key = `${automationSession.sessionId}:${automationPreview.enrollmentId}`;
+    if (automaticApplyAttemptRef.current === key) return;
+    automaticApplyAttemptRef.current = key;
+    void applyAutomationPreviewRef.current?.(
+      automationPreview,
+      automationSession,
+      true
+    );
+  }, [
+    automationPreview,
+    automationSession,
+    cameraStream,
+    recognition.enrollmentId,
+    recognition.status,
+  ]);
 
   useEffect(() => {
     if (!automationSession || !cameraStream || roomOperatingMode !== "camera")
@@ -805,6 +959,8 @@ function App() {
           }
         } else {
           handledEnrollmentRef.current = "";
+          setAutomationPreview(null);
+          setAutomationApplyResult(null);
           if (result.status === "unknown")
             setAutomationError("");
         }
@@ -840,6 +996,8 @@ function App() {
   const changeSelectedRoom = async (roomName) => {
     if (cameraSessionRef.current || cameraStarting)
       await stopCamera();
+    manualCameraOverrideRef.current = false;
+    cameraAutoStartAttemptRef.current = "";
     setSelectedRoom(roomName);
     setRoomOperatingMode("manual");
     setAutomationPreview(null);
@@ -847,6 +1005,7 @@ function App() {
   };
 
   const switchToManualControl = async () => {
+    manualCameraOverrideRef.current = true;
     if (cameraSessionRef.current)
       await stopCamera();
     setRoomOperatingMode("manual");
@@ -1130,6 +1289,9 @@ function App() {
   )
     ? preferenceRoom
     : getRoomLabel(rooms[0]);
+  const activePreferenceDevices = devices.filter(
+    (device) => (device.roomName ?? device.room ?? "Unassigned") === activePreferenceRoom
+  );
   const preferenceKey = JSON.stringify([selectedProfileId, activePreferenceRoom]);
   const preferencesReady = preferencesForKey === preferenceKey;
   const activePreferenceError =
@@ -1174,6 +1336,8 @@ function App() {
           heaterTemperature: Number(data.heaterTemperature),
           fanSpeed: Number(data.fanSpeed),
           lightOn: Number(data.lightOn),
+          automaticApplyEnabled: Boolean(data.automaticApplyEnabled),
+          firstApplicationConfirmed: Boolean(data.firstApplicationConfirmed),
         });
         setPreferencesForKey(key);
         setPreferencesSaved(true);
@@ -1217,6 +1381,16 @@ function App() {
     setApplyResult(null);
   };
 
+  const updateAutomaticApply = (enabled) => {
+    setPreferences((current) => ({
+      ...current,
+      automaticApplyEnabled: enabled,
+    }));
+    setPreferencesSaved(false);
+    setPreferenceMessage("");
+    setApplyResult(null);
+  };
+
   const savePreferences = async (event) => {
     event.preventDefault();
 
@@ -1232,7 +1406,14 @@ function App() {
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ roomName: activePreferenceRoom, ...preferences }),
+          body: JSON.stringify({
+            roomName: activePreferenceRoom,
+            acTemperature: preferences.acTemperature,
+            heaterTemperature: preferences.heaterTemperature,
+            fanSpeed: preferences.fanSpeed,
+            lightOn: preferences.lightOn,
+            automaticApplyEnabled: preferences.automaticApplyEnabled,
+          }),
         }
       );
 
@@ -1241,6 +1422,8 @@ function App() {
         heaterTemperature: Number(data.heaterTemperature),
         fanSpeed: Number(data.fanSpeed),
         lightOn: Number(data.lightOn),
+        automaticApplyEnabled: Boolean(data.automaticApplyEnabled),
+        firstApplicationConfirmed: Boolean(data.firstApplicationConfirmed),
       });
       setPreferencesForKey(preferenceKey);
       setPreferencesSaved(true);
@@ -1276,7 +1459,10 @@ function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ roomName: activePreferenceRoom }),
+          body: JSON.stringify({
+            roomName: activePreferenceRoom,
+            confirmed: true,
+          }),
         }
       );
 
@@ -2024,6 +2210,8 @@ function App() {
     {
       void stopCamera();
     }
+    if (section === "devices" && !manualCameraOverrideRef.current)
+      cameraAutoStartAttemptRef.current = "";
     setActiveSection(section);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -2264,7 +2452,9 @@ function App() {
                       <span className="preference-note">Unspecified values are not applied.</span>
                     </div>
                     <div className="form-grid preference-grid">
-                      <label>Air conditioner temperature
+                      {activePreferenceDevices.some((device) =>
+                        String(device.type ?? device.deviceType).toLowerCase() === "ac"
+                      ) && <label>Air conditioner temperature
                         <select
                           value={preferencesReady ? preferences.acTemperature : -1}
                           disabled={!preferencesReady || preferencesLoading}
@@ -2273,8 +2463,10 @@ function App() {
                           <option value={-1}>No preference</option>
                           {Array.from({ length: 15 }, (_, index) => index + 16).map((value) => <option key={value} value={value}>{value} °C</option>)}
                         </select>
-                      </label>
-                      <label>Heater temperature
+                      </label>}
+                      {activePreferenceDevices.some((device) =>
+                        String(device.type ?? device.deviceType).toLowerCase() === "heater"
+                      ) && <label>Heater temperature
                         <select
                           value={preferencesReady ? preferences.heaterTemperature : -1}
                           disabled={!preferencesReady || preferencesLoading}
@@ -2283,8 +2475,10 @@ function App() {
                           <option value={-1}>No preference</option>
                           {Array.from({ length: 26 }, (_, index) => index + 20).map((value) => <option key={value} value={value}>{value} °C</option>)}
                         </select>
-                      </label>
-                      <label>Fan speed
+                      </label>}
+                      {activePreferenceDevices.some((device) =>
+                        String(device.type ?? device.deviceType).toLowerCase() === "fan"
+                      ) && <label>Fan speed
                         <select
                           value={preferencesReady ? preferences.fanSpeed : -1}
                           disabled={!preferencesReady || preferencesLoading}
@@ -2293,8 +2487,10 @@ function App() {
                           <option value={-1}>No preference</option>
                           {Array.from({ length: 5 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>Speed {value}</option>)}
                         </select>
-                      </label>
-                      <label>Light preference
+                      </label>}
+                      {activePreferenceDevices.some((device) =>
+                        String(device.type ?? device.deviceType).toLowerCase() === "light"
+                      ) && <label>Light preference
                         <select
                           value={preferencesReady ? preferences.lightOn : -1}
                           disabled={!preferencesReady || preferencesLoading}
@@ -2304,13 +2500,35 @@ function App() {
                           <option value={0}>Prefer OFF</option>
                           <option value={1}>Prefer ON</option>
                         </select>
-                      </label>
+                      </label>}
+                      {activePreferenceDevices.length === 0 &&
+                        <p className="fine-print">No supported devices are registered in this room. You can still save the profile and camera preferences.</p>}
                     </div>
                     <p className="fine-print">Supported ranges come from the appliance controls: AC 16–30 °C, heater 20–45 °C, and fan speed 1–5.</p>
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={preferencesReady && preferences.automaticApplyEnabled}
+                        disabled={!preferencesReady || preferencesLoading}
+                        onChange={(event) => updateAutomaticApply(event.target.checked)}
+                      />
+                      Automatically apply these preferences when this profile is recognized in this room after I confirm the first application.
+                    </label>
+                    {preferences.firstApplicationConfirmed && preferences.automaticApplyEnabled &&
+                      <p className="fine-print">First application confirmed. Later recognized visits to this room may automatically apply these saved settings.</p>}
                     <div className="form-actions">
                       <button type="submit" className="primary-button" disabled={!preferencesReady || preferencesLoading}>
                         {preferencesLoading ? "Saving…" : "Save preferences"}
                       </button>
+                      {selectedProfileId && activePreferenceRoom &&
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => {
+                            setEnrollmentProfileId(selectedProfileId);
+                            goTo("camera");
+                          }}
+                        >Enroll this profile for local recognition</button>}
                     </div>
                   </form>
 
@@ -2398,11 +2616,11 @@ function App() {
             <div>
               <p className="eyebrow">ROOM OPERATING MODE</p>
               <h3>{selectedRoom}</h3>
-              <p className="section-subtitle">Choose local manual controls or explicitly start camera recognition for this room.</p>
+              <p className="section-subtitle">Camera monitoring is off by default. Only a room you explicitly enabled may start monitoring when you open it; monitoring is always shown and can be stopped immediately.</p>
             </div>
             <div className="room-mode-options" role="group" aria-label="Room operating mode">
-              <button type="button" className={`secondary-button ${roomOperatingMode === "manual" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "manual"} disabled={cameraStarting} onClick={() => { if (cameraSessionRef.current) void switchToManualControl(); else setRoomOperatingMode("manual"); }}>Manual Control</button>
-              <button type="button" className={`secondary-button ${roomOperatingMode === "camera" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "camera"} disabled={cameraStarting} onClick={() => setRoomOperatingMode("camera")}>Camera Automation</button>
+              <button type="button" className={`secondary-button ${roomOperatingMode === "manual" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "manual"} disabled={cameraStarting} onClick={() => { if (cameraSessionRef.current) void switchToManualControl(); else { manualCameraOverrideRef.current = true; setRoomOperatingMode("manual"); } }}>Manual Control</button>
+              <button type="button" className={`secondary-button ${roomOperatingMode === "camera" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "camera"} disabled={cameraStarting} onClick={() => { manualCameraOverrideRef.current = false; cameraAutoStartAttemptRef.current = ""; setRoomOperatingMode("camera"); }}>Camera Automation</button>
             </div>
           </section>}
 
@@ -2410,7 +2628,7 @@ function App() {
             <section className="room-automation-grid">
               <div className="panel room-automation-main">
                 <div className="room-automation-heading">
-                  <div><p className="eyebrow">ROOM-SCOPED RECOGNITION</p><h3>Camera Automation · {selectedRoom}</h3><p className="section-subtitle">Nothing starts until you press Start Recognition. This session is bound to {automationSession?.roomName ?? selectedRoom}.</p></div>
+                    <div><p className="eyebrow">ROOM-SCOPED RECOGNITION</p><h3>Camera Automation · {selectedRoom}</h3><p className="section-subtitle">This room's saved opt-in controls monitoring. The session is bound to {automationSession?.roomName ?? selectedRoom}; use Stop Recognition or Manual Control to stop it.</p></div>
                   <span className={`camera-status camera-status-${cameraStatus}`} role="status"><i />{cameraStatus === "active" ? "RECOGNITION ACTIVE" : cameraStatus === "unavailable" ? "CAMERA OFFLINE" : cameraStatus.toUpperCase()}</span>
                 </div>
                 {automationError && <div className="alert alert-error" role="alert">{automationError}</div>}
@@ -2420,13 +2638,17 @@ function App() {
                     : <div className="camera-preview camera-preview-placeholder"><span>◉</span><strong>{cameraStatus === "unavailable" ? "Camera Offline" : "Recognition is stopped"}</strong><small>Camera frames remain in this browser and are sent only to the loopback face service.</small></div>}
                   <div className="room-recognition-controls">
                     <div className="global-automation-toggle">
-                      <span><strong>Global automation</strong><small>{automationEnabled ? "Enabled · room sessions still require an explicit start" : "Disabled by default"}</small></span>
+                      <span><strong>Global automation</strong><small>{automationEnabled ? "Enabled · room-level opt-in is still required" : "Disabled by default"}</small></span>
                       <button type="button" role="switch" aria-checked={automationEnabled} aria-label="Enable global camera automation" className={`toggle ${automationEnabled ? "toggle-on" : ""}`} disabled={automationBusy || cameraStarting} onClick={() => updateAutomationEnabled(!automationEnabled)}><span /></button>
                     </div>
+                    <div className="global-automation-toggle">
+                      <span><strong>{selectedRoom} camera monitoring</strong><small>{roomCameraSettingsBusy ? "Loading this room's saved setting…" : roomCameraEnabled ? "Enabled for this room · recognition still requires Start" : "Disabled for this room by default"}</small></span>
+                      <button type="button" role="switch" aria-checked={roomCameraEnabled} aria-label={`Enable camera monitoring for ${selectedRoom}`} className={`toggle ${roomCameraEnabled ? "toggle-on" : ""}`} disabled={roomCameraSettingsBusy || roomCameraSettingsRoom !== selectedRoom || cameraStarting} onClick={() => updateRoomCameraEnabled(!roomCameraEnabled)}><span /></button>
+                    </div>
                     {automationSession
-                      ? <button className="secondary-button danger-button" type="button" onClick={() => { void stopCamera(); }}>Stop Recognition</button>
-                      : <button className="primary-button" type="button" onClick={startCamera} disabled={!automationEnabled || cameraStarting || automationStatus !== "online"}>{cameraStarting ? "Starting local service…" : "Start Recognition"}</button>}
-                    <p className="fine-print">Python service: {automationStatus}. Recognition never changes devices until you review and confirm a preference preview.</p>
+                      ? <button className="secondary-button danger-button" type="button" onClick={() => { void switchToManualControl(); }}>Stop Recognition</button>
+                      : <button className="primary-button" type="button" onClick={startCamera} disabled={roomCameraSettingsRoom !== selectedRoom || !automationEnabled || !roomCameraEnabled || cameraStarting || automationStatus !== "online"}>{cameraStarting ? "Starting local service…" : "Start Recognition"}</button>}
+                    <p className="fine-print">Python service: {automationStatus}. Camera frames are processed locally. First application always requires preview and confirmation; later visits auto-apply only when explicitly enabled for this profile and room.</p>
                   </div>
                 </div>
                 <div className="occupancy-state" aria-live="polite">
@@ -2435,6 +2657,8 @@ function App() {
                     ? `Matched: ${automationPreview?.profileName ?? recognition.displayName}`
                     : recognition.status === "pending"
                       ? `Matching pending (${recognition.observations ?? 0}/${recognition.requiredObservations ?? 3} consistent observations)`
+                      : recognition.status === "uncertain"
+                        ? `Identity uncertain (${recognition.observations ?? 0}/${recognition.requiredObservations ?? 3} consistent observations)`
                       : recognition.status === "ambiguous"
                         ? "Ambiguous: multiple faces detected"
                         : recognition.status === "no_person"
@@ -2449,12 +2673,37 @@ function App() {
                     : recognition.status === "no_person"
                       ? "No personalized settings are eligible. This is not an occupancy or room-vacancy determination."
                       : recognition.status === "unknown"
-                        ? "Unknown identities never load or apply household preferences."
+                        ? "We don't recognize you yet. Unknown identities never load or apply household preferences."
+                        : recognition.status === "uncertain"
+                        ? recognition.reason === "poor_quality"
+                          ? "Lighting, contrast, or focus is too poor for a reliable observation. Adjust the camera view; no profile or device changes are allowed."
+                          : "The match is not reliable enough yet. No profile or device changes are allowed until observations are consistent."
                         : "Face matching is local, probabilistic, and is not liveness detection or secure authentication."}</p>
                 </div>
+                {recognition.status === "unknown" && <div className="form-actions">
+                  <button
+                    className="primary-button"
+                    type="button"
+                    onClick={() => {
+                      setPreferenceRoom(automationSession?.roomName ?? selectedRoom);
+                      goTo("profiles");
+                    }}
+                  >Set Up My Profile &amp; Room Preferences</button>
+                  <button className="secondary-button" type="button" onClick={() => { void switchToManualControl(); }}>Continue with Manual Control</button>
+                </div>}
+                {recognition.status === "matched" && !automationPreview && automationError.includes("No saved preferences") && <div className="form-actions">
+                  <button className="primary-button" type="button" onClick={() => {
+                    setSelectedProfileId(
+                      enrollments.find((item) => item.id === recognition.enrollmentId)?.profileId ?? ""
+                    );
+                    setPreferenceRoom(automationSession?.roomName ?? selectedRoom);
+                    goTo("profiles");
+                  }}>Set Up Preferences for This Room</button>
+                  <button className="secondary-button" type="button" onClick={() => { void switchToManualControl(); }}>Continue with Manual Control</button>
+                </div>}
                 {automationPreview && <section className="panel automation-preference-preview" aria-labelledby="automation-preview-title">
                   <div className="form-heading">
-                    <div><p className="eyebrow">CONFIRMATION REQUIRED</p><h3 id="automation-preview-title">Preference preview · {automationPreview.roomName}</h3><p>Linked profile: {automationPreview.profileName} ({automationPreview.profileId})</p></div>
+                    <div><p className="eyebrow">{automationPreview.automaticApplyEnabled && automationPreview.firstApplicationConfirmed ? "AUTOMATIC APPLICATION ENABLED" : "CONFIRMATION REQUIRED"}</p><h3 id="automation-preview-title">Preference preview · {automationPreview.roomName}</h3><p>Linked profile: {automationPreview.profileName} ({automationPreview.profileId})</p></div>
                     <button type="button" className="primary-button" onClick={applyAutomationPreview} disabled={automationBusy || automationPreview.alreadyApplied || automationApplyResult?.success === true || recognition.status !== "matched" || recognition.enrollmentId !== automationPreview.enrollmentId}>{automationBusy ? "Applying…" : automationPreview.alreadyApplied ? "Already applied this session" : "Confirm and apply"}</button>
                   </div>
                   <div className="automation-preview-list">
@@ -2849,7 +3098,7 @@ function App() {
         </section>}
 
         {activeSection === "camera" && <section id="camera" className="content-section">
-          <div className="section-heading"><div><p className="eyebrow">LOCAL AND CONSENT-BASED</p><h2>Facial recognition setup</h2><p className="section-subtitle">Enroll consenting household members against existing SmartHomeOS profiles. Camera recognition starts only from a selected room's Camera Automation mode.</p></div><span className={`camera-status camera-status-${automationStatus}`} role="status"><i />FACE SERVICE {automationStatus.toUpperCase()}</span></div>
+          <div className="section-heading"><div><p className="eyebrow">LOCAL AND CONSENT-BASED</p><h2>Facial recognition setup</h2><p className="section-subtitle">Enroll consenting household members against existing SmartHomeOS profiles. Recognition starts only for rooms with explicit camera opt-in and global automation enabled.</p></div><span className={`camera-status camera-status-${automationStatus}`} role="status"><i />FACE SERVICE {automationStatus.toUpperCase()}</span></div>
           {automationError && <div className="alert alert-error" role="alert">{automationError}</div>}
           {enrollmentMessage && <div className={`form-message ${enrollmentMessage.startsWith("Enrollment failed") || enrollmentMessage.startsWith("Could not") ? "is-error" : "is-success"}`} role="status">{enrollmentMessage}</div>}
           <div className="camera-layout">

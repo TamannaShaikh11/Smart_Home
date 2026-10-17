@@ -2,6 +2,7 @@ import base64
 import binascii
 import ctypes
 import json
+import math
 import os
 import re
 import threading
@@ -26,6 +27,9 @@ PORT = int(os.environ.get("SMARTHOME_FACE_PORT", "8765"))
 MATCH_THRESHOLD = float(os.environ.get("SMARTHOME_FACE_MATCH_THRESHOLD", "55"))
 CONSISTENT_MATCHES = 3
 FACE_SIZE = (128, 128)
+FACE_BRIGHTNESS_RANGE = (35.0, 220.0)
+FACE_CONTRAST_MINIMUM = 15.0
+FACE_SHARPNESS_MINIMUM = 8.0
 MAX_BODY_BYTES = 4 * 1024 * 1024
 ENTROPY = b"SmartHomeOS local face templates v1"
 STORE_PATH = (
@@ -33,6 +37,9 @@ STORE_PATH = (
     / "SmartHomeOS"
     / "face_templates.dpapi"
 )
+
+if not math.isfinite(MATCH_THRESHOLD) or MATCH_THRESHOLD <= 0:
+    raise SystemExit("SMARTHOME_FACE_MATCH_THRESHOLD must be a finite positive number.")
 
 
 class DataBlob(ctypes.Structure):
@@ -135,6 +142,7 @@ class FaceMatcher:
         self.enrollments = {}
         self.sessions = {}
         self.active_session = None
+        self._retrain()
         STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
         self._load()
 
@@ -222,6 +230,17 @@ class FaceMatcher:
             result.append(cv2.resize(face, FACE_SIZE, interpolation=cv2.INTER_AREA))
         return result
 
+    @staticmethod
+    def _is_good_quality(face):
+        brightness = float(np.mean(face))
+        contrast = float(np.std(face))
+        sharpness = float(cv2.Laplacian(face, cv2.CV_64F).var())
+        return (
+            FACE_BRIGHTNESS_RANGE[0] <= brightness <= FACE_BRIGHTNESS_RANGE[1]
+            and contrast >= FACE_CONTRAST_MINIMUM
+            and sharpness >= FACE_SHARPNESS_MINIMUM
+        )
+
     def enroll(self, enrollment_id, display_name, frames):
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", enrollment_id):
             raise ValueError("Enrollment ID is invalid.")
@@ -229,6 +248,11 @@ class FaceMatcher:
             raise ValueError("A display name between 1 and 80 characters is required.")
         if not isinstance(frames, list) or not 8 <= len(frames) <= 20:
             raise ValueError("Capture 8 to 20 consented face samples.")
+        with self.lock:
+            if enrollment_id in self.enrollments:
+                raise RuntimeError(
+                    "This enrollment already exists. Delete it before re-enrolling."
+                )
         faces = []
         for frame in frames:
             detections = self._faces(self._decode_frame(frame))
@@ -236,6 +260,10 @@ class FaceMatcher:
                 raise ValueError(
                     "Each enrollment frame must contain exactly one face; "
                     "multiple faces are never enrolled."
+                )
+            if not self._is_good_quality(detections[0]):
+                raise ValueError(
+                    "Enrollment frame is too dark, washed out, low contrast, or blurry."
                 )
             faces.append(detections[0])
         with self.lock:
@@ -261,7 +289,16 @@ class FaceMatcher:
             return True
 
     def start_session(self, session_id, room_name):
+        if (
+            not isinstance(session_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", session_id)
+        ):
+            raise ValueError("sessionId is invalid.")
+        if not isinstance(room_name, str) or not room_name.strip() or len(room_name) > 100:
+            raise ValueError("A valid roomName is required.")
         with self.lock:
+            if session_id in self.sessions:
+                raise RuntimeError("Recognition session ID is already active.")
             if self.active_session is not None:
                 active = self.sessions.get(self.active_session)
                 if active is not None and time.time() - active["lastSeen"] <= 20:
@@ -272,6 +309,7 @@ class FaceMatcher:
                 "roomName": room_name,
                 "candidate": None,
                 "count": 0,
+                "unknownCount": 0,
                 "resolved": None,
                 "lastSeen": int(time.time()),
             }
@@ -299,21 +337,60 @@ class FaceMatcher:
             if len(faces) > 1:
                 session["candidate"] = None
                 session["count"] = 0
+                session["unknownCount"] = 0
+                session["resolved"] = None
                 return {"status": "ambiguous", "faceCount": len(faces)}
             if not faces:
                 session["candidate"] = None
                 session["count"] = 0
+                session["unknownCount"] = 0
+                session["resolved"] = None
                 return {"status": "no_person", "faceCount": 0}
+            if not self._is_good_quality(faces[0]):
+                session["candidate"] = None
+                session["count"] = 0
+                session["unknownCount"] = 0
+                session["resolved"] = None
+                return {
+                    "status": "uncertain",
+                    "faceCount": 1,
+                    "reason": "poor_quality",
+                }
             if not self.trained:
                 session["candidate"] = None
                 session["count"] = 0
-                return {"status": "unknown", "faceCount": 1}
+                session["resolved"] = None
+                session["unknownCount"] += 1
+                status = (
+                    "unknown"
+                    if session["unknownCount"] >= CONSISTENT_MATCHES
+                    else "uncertain"
+                )
+                return {
+                    "status": status,
+                    "faceCount": 1,
+                    "observations": session["unknownCount"],
+                    "requiredObservations": CONSISTENT_MATCHES,
+                }
             label, distance = self.recognizer.predict(faces[0])
             enrollment_id = self.label_ids.get(label)
             if enrollment_id is None or distance > MATCH_THRESHOLD:
                 session["candidate"] = None
                 session["count"] = 0
-                return {"status": "unknown", "faceCount": 1}
+                session["resolved"] = None
+                session["unknownCount"] += 1
+                status = (
+                    "unknown"
+                    if session["unknownCount"] >= CONSISTENT_MATCHES
+                    else "uncertain"
+                )
+                return {
+                    "status": status,
+                    "faceCount": 1,
+                    "observations": session["unknownCount"],
+                    "requiredObservations": CONSISTENT_MATCHES,
+                }
+            session["unknownCount"] = 0
             if session["candidate"] == enrollment_id:
                 session["count"] += 1
             else:
@@ -386,16 +463,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
+        path = urlparse(self.path).path
+        if path == "/health":
             self._send(200, {
                 "status": "online",
                 "model": "OpenCV Haar cascade + LBPH",
+                "modelReady": (
+                    not MATCHER.detector.empty()
+                    and hasattr(MATCHER, "recognizer")
+                ),
                 "threshold": MATCH_THRESHOLD,
                 "consistentObservations": CONSISTENT_MATCHES,
                 "activeSession": MATCHER.active_session is not None,
             })
             return
-        if urlparse(self.path).path == "/enrollments":
+        if path.startswith("/recognition/sessions/"):
+            session_id = unquote(path.rsplit("/", 1)[-1])
+            with MATCHER.lock:
+                session = MATCHER.sessions.get(session_id)
+                if session is None or MATCHER.active_session != session_id:
+                    self._send(404, {"error": "Recognition session is not active."})
+                    return
+                self._send(200, {
+                    "sessionId": session_id,
+                    "roomName": session["roomName"],
+                    "status": "active",
+                })
+            return
+        if path == "/enrollments":
             with MATCHER.lock:
                 self._send(200, [
                     {

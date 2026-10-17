@@ -46,6 +46,14 @@ struct UserPreferenceRecord
 
     // -1 = unspecified, 0 = prefer OFF, 1 = prefer ON.
     int lightOn = -1;
+    bool automaticApplyEnabled = false;
+    bool firstApplicationConfirmed = false;
+};
+
+struct RoomAutomationSettings
+{
+    std::string roomName;
+    bool cameraEnabled = false;
 };
 
 struct AutomationEnrollmentRecord
@@ -117,6 +125,14 @@ public:
         const std::string &userId,
         const std::string &roomName,
         UserPreferenceRecord &preferences)const;
+    bool confirmPreferenceAutomation(
+        const std::string &userId,
+        const std::string &roomName);
+    bool loadRoomAutomationSettings(
+        const std::string &roomName,
+        RoomAutomationSettings &settings) const;
+    bool saveRoomAutomationSettings(
+        const RoomAutomationSettings &settings);
 
     bool addAutomationEnrollment(
         const AutomationEnrollmentRecord &enrollment);

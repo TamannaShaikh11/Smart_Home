@@ -132,7 +132,7 @@ bool Database::initializeSchema()
             ? sqlite3_column_int(versionStatement, 0)
             : -1;
     sqlite3_finalize(versionStatement);
-    if (schemaVersion < 0 || schemaVersion > 3)
+    if (schemaVersion < 0 || schemaVersion > 4)
     {
         std::cerr << "Unsupported database schema version: "
                   << schemaVersion << '\n';
@@ -372,6 +372,44 @@ bool Database::initializeSchema()
                 "ON mode_history(applied_at DESC);");
         if (migrationSucceeded)
             migrationSucceeded = execute("PRAGMA user_version = 3;");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("COMMIT;");
+        else
+            execute("ROLLBACK;");
+    }
+
+    if (schemaVersion < 4)
+    {
+        if (!createMigrationBackup(db, filename, 4))
+            return false;
+        if (!execute("BEGIN IMMEDIATE;"))
+            return false;
+
+        migrationSucceeded = execute(R"(
+            ALTER TABLE user_preferences
+                ADD COLUMN automatic_apply_enabled INTEGER NOT NULL DEFAULT 0
+                    CHECK (automatic_apply_enabled IN (0, 1));
+        )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(R"(
+                ALTER TABLE user_preferences
+                    ADD COLUMN first_application_confirmed INTEGER NOT NULL DEFAULT 0
+                        CHECK (first_application_confirmed IN (0, 1));
+            )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(R"(
+                CREATE TABLE IF NOT EXISTS room_automation_settings (
+                    room_name TEXT PRIMARY KEY,
+                    camera_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK (camera_enabled IN (0, 1)),
+                    FOREIGN KEY (room_name)
+                        REFERENCES rooms(name)
+                        ON UPDATE CASCADE
+                        ON DELETE CASCADE
+                );
+            )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("PRAGMA user_version = 4;");
         if (migrationSucceeded)
             migrationSucceeded = execute("COMMIT;");
         else
@@ -882,16 +920,26 @@ bool Database::savePreferences(
     const char* sql = R"(
         INSERT INTO user_preferences (
             user_id, room_name,
-            ac_temperature, heater_temperature,
-            fan_speed, light_on
+            ac_temperature, heater_temperature, fan_speed, light_on,
+            automatic_apply_enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, room_name)
         DO UPDATE SET
             ac_temperature = excluded.ac_temperature,
             heater_temperature = excluded.heater_temperature,
             fan_speed = excluded.fan_speed,
-            light_on = excluded.light_on;
+            light_on = excluded.light_on,
+            automatic_apply_enabled = excluded.automatic_apply_enabled,
+            first_application_confirmed = CASE
+                WHEN user_preferences.ac_temperature != excluded.ac_temperature
+                  OR user_preferences.heater_temperature != excluded.heater_temperature
+                  OR user_preferences.fan_speed != excluded.fan_speed
+                  OR user_preferences.light_on != excluded.light_on
+                  OR user_preferences.automatic_apply_enabled != excluded.automatic_apply_enabled
+                THEN 0
+                ELSE user_preferences.first_application_confirmed
+            END;
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -916,6 +964,7 @@ bool Database::savePreferences(
     sqlite3_bind_int(stmt, 4, preferences.heaterTemperature);
     sqlite3_bind_int(stmt, 5, preferences.fanSpeed);
     sqlite3_bind_int(stmt, 6, preferences.lightOn);
+    sqlite3_bind_int(stmt, 7, preferences.automaticApplyEnabled ? 1 : 0);
 
     const int result = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -936,8 +985,8 @@ bool Database::loadPreferences(
     UserPreferenceRecord& preferences) const
 {
     const char* sql = R"(
-        SELECT ac_temperature, heater_temperature,
-               fan_speed, light_on
+        SELECT ac_temperature, heater_temperature, fan_speed, light_on,
+               automatic_apply_enabled, first_application_confirmed
         FROM user_preferences
         WHERE user_id = ? AND room_name = ?;
     )";
@@ -976,11 +1025,99 @@ bool Database::loadPreferences(
 
         preferences.lightOn =
             sqlite3_column_int(stmt, 3);
+        preferences.automaticApplyEnabled =
+            sqlite3_column_int(stmt, 4) != 0;
+        preferences.firstApplicationConfirmed =
+            sqlite3_column_int(stmt, 5) != 0;
     }
 
     sqlite3_finalize(stmt);
 
     return result == SQLITE_ROW;
+}
+
+bool Database::confirmPreferenceAutomation(
+    const std::string &userId,
+    const std::string &roomName)
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        UPDATE user_preferences
+        SET first_application_confirmed = 1
+        WHERE user_id = ? AND room_name = ? AND automatic_apply_enabled = 1;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare preference automation confirmation failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, userId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, roomName.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement);
+    const bool updated =
+        result == SQLITE_DONE && sqlite3_changes(db) == 1;
+    if (result != SQLITE_DONE)
+        std::cerr << "Confirm preference automation failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    sqlite3_finalize(statement);
+    return updated;
+}
+
+bool Database::loadRoomAutomationSettings(
+    const std::string &roomName,
+    RoomAutomationSettings &settings) const
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT camera_enabled
+        FROM room_automation_settings
+        WHERE room_name = ?;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare room automation settings load failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, roomName.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement);
+    settings.roomName = roomName;
+    settings.cameraEnabled =
+        result == SQLITE_ROW && sqlite3_column_int(statement, 0) != 0;
+    const bool loaded = result == SQLITE_ROW || result == SQLITE_DONE;
+    if (result != SQLITE_ROW && result != SQLITE_DONE)
+        std::cerr << "Load room automation settings failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    sqlite3_finalize(statement);
+    return loaded;
+}
+
+bool Database::saveRoomAutomationSettings(
+    const RoomAutomationSettings &settings)
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        INSERT INTO room_automation_settings (room_name, camera_enabled)
+        VALUES (?, ?)
+        ON CONFLICT(room_name) DO UPDATE SET
+            camera_enabled = excluded.camera_enabled;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare room automation settings save failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(
+        statement, 1, settings.roomName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, settings.cameraEnabled ? 1 : 0);
+    const int result = sqlite3_step(statement);
+    if (result != SQLITE_DONE)
+        std::cerr << "Save room automation settings failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE;
 }
 
 bool Database::addAutomationEnrollment(

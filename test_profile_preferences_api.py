@@ -408,7 +408,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.assertTrue({
             "light_type", "brightness", "color", "color_temperature"
         }.issubset(columns))
-        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
         automation_tables = {
             row[0] for row in database.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -418,6 +418,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "automation_enrollments",
             "automation_events",
             "automation_settings",
+            "room_automation_settings",
             "mode_presets",
             "mode_history",
         }.issubset(automation_tables))
@@ -446,6 +447,27 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             self.assertEqual(
                 backup_db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
                 self.baseline_device_count,
+            )
+            backup_db.close()
+
+        v4_backups = list(
+            self.database_dir.glob("smarthome.db.pre-v4-*.bak")
+        )
+        self.assertEqual(
+            len(v4_backups),
+            1 if self.baseline_schema_version < 4 else 0,
+        )
+        if v4_backups:
+            backup_db = sqlite3.connect(
+                f"file:{v4_backups[0]}?mode=ro", uri=True
+            )
+            self.assertEqual(
+                backup_db.execute("PRAGMA user_version").fetchone()[0],
+                3,
+            )
+            self.assertEqual(
+                backup_db.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
             )
             backup_db.close()
 
@@ -717,6 +739,352 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         )
         database.close()
 
+    def test_z_camera_settings_and_sessions_for_every_room_and_new_rooms(self):
+        expected_rooms = {
+            "Bathroom",
+            "Bedroom",
+            "Guest Room",
+            "Kitchen",
+            "Living Room",
+            "Study Room",
+            "Test Room",
+        }
+        _, existing_rooms = self.request("GET", "/api/rooms")
+        room_names = [room["name"] for room in existing_rooms]
+        self.assertTrue(expected_rooms.issubset(set(room_names)))
+
+        future_room = f"Future Room {uuid.uuid4().hex[:10]}"
+        self.request("POST", "/api/rooms", {"name": future_room}, expected=201)
+        room_names.append(future_room)
+
+        _, initial_settings = self.request(
+            "GET", "/api/automation/room-settings"
+        )
+        settings_by_room = {
+            item["roomName"]: item["cameraEnabled"]
+            for item in initial_settings
+        }
+        self.assertTrue(set(room_names).issubset(settings_by_room))
+        for room_name in expected_rooms | {future_room}:
+            self.assertFalse(settings_by_room[room_name], room_name)
+
+        self.request(
+            "GET", "/api/automation/room-settings?roomName=", expected=400
+        )
+        self.request(
+            "GET",
+            f"/api/automation/room-settings?roomName=missing_{uuid.uuid4().hex}",
+            expected=404,
+        )
+        self.request(
+            "PUT",
+            "/api/automation/room-settings",
+            {"roomName": f"missing_{uuid.uuid4().hex}", "cameraEnabled": True},
+            expected=404,
+        )
+
+        for room_name in room_names:
+            self.request(
+                "PUT",
+                "/api/automation/room-settings",
+                {"roomName": room_name, "cameraEnabled": True},
+            )
+            _, settings = self.request(
+                "GET",
+                "/api/automation/room-settings?roomName="
+                + urllib.parse.quote(room_name, safe=""),
+            )
+            self.assertTrue(settings["cameraEnabled"], room_name)
+        _, all_enabled = self.request("GET", "/api/automation/room-settings")
+        self.assertEqual(
+            {item["roomName"] for item in all_enabled},
+            set(room_names),
+        )
+        self.assertTrue(all(item["cameraEnabled"] for item in all_enabled))
+        for room_name in room_names:
+            for enabled in (False, True):
+                self.request(
+                    "PUT",
+                    "/api/automation/room-settings",
+                    {"roomName": room_name, "cameraEnabled": enabled},
+                )
+                _, settings = self.request(
+                    "GET",
+                    "/api/automation/room-settings?roomName="
+                    + urllib.parse.quote(room_name, safe=""),
+                )
+                self.assertEqual(settings["cameraEnabled"], enabled)
+                _, other_settings = self.request(
+                    "GET", "/api/automation/room-settings"
+                )
+                self.assertEqual(
+                    {
+                        item["roomName"]: item["cameraEnabled"]
+                        for item in other_settings
+                    },
+                    {
+                        name: True if name != room_name else enabled
+                        for name in room_names
+                    },
+                )
+
+        with socket.socket() as port_socket:
+            port_socket.bind(("127.0.0.1", 0))
+            face_port = port_socket.getsockname()[1]
+        face_data = self.database_dir / "face-service-data"
+        face_data.mkdir()
+        face_environment = os.environ.copy()
+        face_environment["SMARTHOME_FACE_PORT"] = str(face_port)
+        face_environment["LOCALAPPDATA"] = str(face_data)
+        face_service = subprocess.Popen(
+            [sys.executable, str(ROOT / "face_automation_service.py")],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=face_environment,
+        )
+        face_url = f"http://127.0.0.1:{face_port}"
+
+        def face_request(method, path, body=None, expected=200):
+            data = None if body is None else json.dumps(body).encode("utf-8")
+            headers = (
+                {} if data is None else {"Content-Type": "application/json"}
+            )
+            request = urllib.request.Request(
+                f"{face_url}{path}", data=data, headers=headers, method=method
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=3)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                payload = response.read().decode("utf-8")
+                if response.status != expected:
+                    raise AssertionError(
+                        f"Face service {method} {path}: expected {expected}, "
+                        f"got {response.status}: {payload}"
+                    )
+                return json.loads(payload) if payload else {}
+
+        try:
+            face_deadline = time.monotonic() + 10
+            while True:
+                if face_service.poll() is not None:
+                    self.fail("Local face service exited before becoming ready.")
+                try:
+                    health = face_request("GET", "/health")
+                    break
+                except urllib.error.URLError:
+                    if time.monotonic() >= face_deadline:
+                        self.fail("Local face service did not become ready.")
+                    time.sleep(0.1)
+            self.assertEqual(health["status"], "online")
+            self.assertTrue(health["modelReady"])
+
+            self.request(
+                "PUT", "/api/automation/settings", {"enabled": True}
+            )
+            profile_id = f"room_matrix_{uuid.uuid4().hex[:10]}"
+            self.request(
+                "POST",
+                "/api/profiles",
+                {"id": profile_id, "displayName": "Room Matrix Member"},
+                expected=201,
+            )
+            _, enrollment = self.request(
+                "POST",
+                "/api/automation/enrollments",
+                {"profileId": profile_id, "consent": True},
+                expected=201,
+            )
+            _, initial_devices = self.request("GET", "/api/devices")
+            fan_ids = {room_name: set() for room_name in room_names}
+            baseline_fan_settings = {}
+            for device in initial_devices:
+                if device["type"] == "Fan" and device["roomName"] in fan_ids:
+                    fan_ids[device["roomName"]].add(device["id"])
+                    baseline_fan_settings[device["id"]] = device["setting"]
+            preferred_speeds = {}
+            for index, room_name in enumerate(room_names):
+                fan_id = f"RM_FAN_{index}_{uuid.uuid4().hex[:8]}"
+                speed = 2 + index % 4
+                fan_ids[room_name].add(fan_id)
+                baseline_fan_settings[fan_id] = 1
+                preferred_speeds[room_name] = speed
+                self.request(
+                    "POST",
+                    "/api/devices",
+                    {
+                        "id": fan_id,
+                        "name": f"Room Matrix Fan {index}",
+                        "type": "Fan",
+                        "roomName": room_name,
+                        "powerWatts": 45,
+                        "temporary": False,
+                        "initialOn": False,
+                        "setting": 1,
+                    },
+                    expected=201,
+                )
+                self.request(
+                    "PUT",
+                    f"/api/profiles/{profile_id}/preferences",
+                    {
+                        "roomName": room_name,
+                        "acTemperature": -1,
+                        "heaterTemperature": -1,
+                        "fanSpeed": speed,
+                        "lightOn": -1,
+                        "automaticApplyEnabled": False,
+                    },
+                )
+                _, saved_preference = self.request(
+                    "GET",
+                    f"/api/profiles/{profile_id}/preferences?roomName="
+                    + urllib.parse.quote(room_name, safe=""),
+                )
+                self.assertEqual(saved_preference["roomName"], room_name)
+                self.assertEqual(saved_preference["fanSpeed"], speed)
+
+            expected_fan_settings = dict(baseline_fan_settings)
+            for index, room_name in enumerate(room_names):
+                _, session = self.request(
+                    "POST",
+                    "/api/automation/sessions",
+                    {"roomName": room_name},
+                    expected=201,
+                )
+                session_id = session["sessionId"]
+                self.assertEqual(session["roomName"], room_name)
+                self.request(
+                    "POST",
+                    "/api/automation/sessions",
+                    {"roomName": room_names[(index + 1) % len(room_names)]},
+                    expected=409,
+                )
+                face_session = face_request(
+                    "POST",
+                    "/recognition/sessions",
+                    {"sessionId": session_id, "roomName": room_name},
+                    expected=201,
+                )
+                self.assertEqual(face_session["sessionId"], session_id)
+                self.assertEqual(face_session["roomName"], room_name)
+                face_request(
+                    "POST",
+                    "/recognition/sessions",
+                    {
+                        "sessionId": f"room_conflict_{uuid.uuid4().hex[:12]}",
+                        "roomName": room_names[(index + 1) % len(room_names)],
+                    },
+                    expected=409,
+                )
+                _, api_session = self.request(
+                    "GET", f"/api/automation/sessions/{session_id}"
+                )
+                self.assertEqual(api_session["roomName"], room_name)
+                face_session = face_request(
+                    "GET", f"/recognition/sessions/{session_id}"
+                )
+                self.assertEqual(face_session["roomName"], room_name)
+                self.request(
+                    "POST",
+                    f"/api/automation/sessions/{session_id}/observation",
+                    {
+                        "roomName": room_name,
+                        "status": "matched",
+                        "enrollmentId": enrollment["id"],
+                    },
+                )
+                _, preview = self.request(
+                    "POST",
+                    f"/api/automation/sessions/{session_id}/resolve",
+                    {
+                        "roomName": room_name,
+                        "enrollmentId": enrollment["id"],
+                    },
+                )
+                self.assertEqual(preview["profileId"], profile_id)
+                self.assertEqual(preview["roomName"], room_name)
+                self.assertEqual(
+                    {
+                        action.get("deviceId")
+                        for action in preview["preview"]
+                    },
+                    fan_ids[room_name],
+                )
+                _, applied = self.request(
+                    "POST",
+                    f"/api/profiles/{profile_id}/preferences/apply",
+                    {
+                        "roomName": room_name,
+                        "automationSessionId": session_id,
+                        "confirmed": True,
+                    },
+                )
+                self.assertTrue(applied["success"])
+                self.assertEqual(
+                    {
+                        action["deviceId"]: action["value"]
+                        for action in applied["actions"]
+                    },
+                    {
+                        fan_id: preferred_speeds[room_name]
+                        for fan_id in fan_ids[room_name]
+                    },
+                )
+                for fan_id in fan_ids[room_name]:
+                    expected_fan_settings[fan_id] = preferred_speeds[room_name]
+                _, devices = self.request("GET", "/api/devices")
+                updated_fans = {
+                    item["id"]: item["setting"]
+                    for item in devices
+                    if item["id"] in baseline_fan_settings
+                }
+                self.assertEqual(updated_fans, expected_fan_settings)
+                face_request(
+                    "DELETE",
+                    f"/recognition/sessions/{session_id}",
+                    expected=200,
+                )
+                self.request(
+                    "DELETE", f"/api/automation/sessions/{session_id}"
+                )
+
+            expected_values = {}
+            for index, room_name in enumerate(room_names):
+                enabled = index % 2 == 0
+                expected_values[room_name] = enabled
+                self.request(
+                    "PUT",
+                    "/api/automation/room-settings",
+                    {"roomName": room_name, "cameraEnabled": enabled},
+                )
+
+            self.stop_server()
+            self.start_server()
+            _, persisted_settings = self.request(
+                "GET", "/api/automation/room-settings"
+            )
+            self.assertEqual(
+                {
+                    item["roomName"]: item["cameraEnabled"]
+                    for item in persisted_settings
+                },
+                expected_values,
+            )
+            self.request(
+                "PUT", "/api/automation/settings", {"enabled": False}
+            )
+        finally:
+            if face_service.poll() is None:
+                face_service.terminate()
+                try:
+                    face_service.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    face_service.kill()
+                    face_service.wait(timeout=5)
+
     def test_room_scoped_camera_automation_and_confirmed_apply(self):
         suffix = uuid.uuid4().hex[:10]
         room = f"Automation Test {suffix}"
@@ -741,6 +1109,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             {"name": other_room},
             expected=201,
         )
+        _, room_settings = self.request(
+            "GET",
+            f"/api/automation/room-settings?roomName={urllib.parse.quote(room, safe='')}",
+        )
+        self.assertFalse(room_settings["cameraEnabled"])
         self.request(
             "POST",
             "/api/automation/sessions",
@@ -751,6 +1124,17 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "PUT",
             "/api/automation/settings",
             {"enabled": True},
+        )
+        self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": room},
+            expected=403,
+        )
+        self.request(
+            "PUT",
+            "/api/automation/room-settings",
+            {"roomName": room, "cameraEnabled": True},
         )
         self.request(
             "POST",
@@ -821,6 +1205,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
                 "heaterTemperature": -1,
                 "fanSpeed": 4,
                 "lightOn": 1,
+                "automaticApplyEnabled": True,
             },
         )
         _, enrollments_before = self.request(
@@ -851,6 +1236,12 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             {"profileId": empty_profile_id, "consent": True},
             expected=201,
         )
+        self.request(
+            "POST",
+            "/api/automation/enrollments",
+            {"profileId": profile_id, "consent": True},
+            expected=409,
+        )
         self.assertNotIn("template", enrollment)
         self.assertEqual(enrollment["profileId"], profile_id)
 
@@ -862,6 +1253,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         )
         session_id = session["sessionId"]
         self.assertEqual(session["roomName"], room)
+        self.request(
+            "PUT",
+            "/api/automation/room-settings",
+            {"roomName": other_room, "cameraEnabled": True},
+        )
         self.request(
             "POST",
             "/api/automation/sessions",
@@ -884,6 +1280,17 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "POST",
             f"/api/automation/sessions/{session_id}/observation",
             {"roomName": room, "status": "ambiguous"},
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+            expected=409,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "uncertain"},
         )
         self.request(
             "POST",
@@ -964,6 +1371,12 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             {item["status"] for item in applied["actions"]},
             {"applied"},
         )
+        _, saved_preferences = self.request(
+            "GET",
+            f"/api/profiles/{profile_id}/preferences?roomName={urllib.parse.quote(room, safe='')}",
+        )
+        self.assertTrue(saved_preferences["automaticApplyEnabled"])
+        self.assertTrue(saved_preferences["firstApplicationConfirmed"])
         self.request(
             "POST",
             apply_url,
@@ -1003,6 +1416,53 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.request(
             "DELETE",
             f"/api/automation/sessions/{session_id}",
+        )
+        self.stop_server()
+        self.start_server()
+        _, persisted_room_settings = self.request(
+            "GET",
+            f"/api/automation/room-settings?roomName={urllib.parse.quote(room, safe='')}",
+        )
+        self.assertTrue(persisted_room_settings["cameraEnabled"])
+        _, persisted_preferences = self.request(
+            "GET",
+            f"/api/profiles/{profile_id}/preferences?roomName={urllib.parse.quote(room, safe='')}",
+        )
+        self.assertTrue(persisted_preferences["firstApplicationConfirmed"])
+        _, returning_session = self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": room},
+            expected=201,
+        )
+        returning_session_id = returning_session["sessionId"]
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{returning_session_id}/observation",
+            {"roomName": room, "status": "matched",
+             "enrollmentId": enrollment["id"]},
+        )
+        _, returning_preview = self.request(
+            "POST",
+            f"/api/automation/sessions/{returning_session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+        )
+        self.assertTrue(returning_preview["automaticApplyEnabled"])
+        self.assertTrue(returning_preview["firstApplicationConfirmed"])
+        _, returning_apply = self.request(
+            "POST",
+            apply_url,
+            {
+                "roomName": room,
+                "automationSessionId": returning_session_id,
+                "confirmed": True,
+                "automatic": True,
+            },
+        )
+        self.assertTrue(returning_apply["success"])
+        self.request(
+            "DELETE",
+            f"/api/automation/sessions/{returning_session_id}",
         )
         self.request(
             "PUT",

@@ -440,6 +440,10 @@ Run the backend from the repository root so it opens the existing root
 `smarthome.db`. If an older API process already owns port 8080, stop that
 process deliberately before starting the updated development executable; do
 not replace the database or overwrite `SmartHomeAPI.exe`.
+If an older server returns `404` for `/api/automation/room-settings`, it is
+still running an executable built before that route was added: rebuild the API
+and restart that process. The frontend uses the same generic API for every
+room; it does not have room-specific endpoints.
 
 ### Existing API and preferences
 
@@ -533,10 +537,23 @@ has not been tested here.
 
 Every selected room offers **Manual Control** and **Camera Automation**.
 Manual device controls remain usable without the Python service or a camera.
-Camera recognition is opt-in: select a room, enable the global automation
-setting, and press **Start Recognition**. Room changes stop the active session
-before returning to manual mode; recognition stopping never powers devices off.
-Recognized preferences are previewed and require an explicit confirmation.
+Camera recognition is opt-in: select a room and enable that room's camera
+monitoring and the global automation setting. Once explicitly enabled, opening
+that room starts monitoring and displays a camera-active indicator; the user
+can stop it immediately or switch to manual controls. Rooms remain disabled by
+default. Room changes replace the active session; recognition stopping never
+powers devices off.
+Unknown faces must persist across three single-face observations before they
+are reported as unknown; low-light, low-contrast, and blurry observations are
+treated as uncertain and never resolve household preferences. These image
+quality screens are conservative heuristics and still need validation with the
+household's actual camera and lighting. Recognized preferences are previewed
+and require an explicit confirmation the first time. The profile's
+room-preference form has a separate
+automatic-application option. If enabled, subsequent consistent matches in
+that same room can apply the saved preferences automatically after the first
+successful confirmed application. Changing the saved preferences or the
+automatic-application option requires first confirmation again.
 
 For Windows, install the local face-service dependency and run the service from
 the repository root in a separate terminal:
@@ -556,6 +573,12 @@ the local Vite page when prompted. Enrollment is available on the Facial
 Recognition Setup page and requires selecting an existing profile and checking
 the explicit consent box. Delete enrollment there to remove its local
 protected template and metadata.
+The frontend polls the actual local `/health` endpoint; if the Python process
+is not listening, the service is offline rather than assumed healthy. The
+service does not open a webcam itself: the browser owns the camera stream and
+sends frames locally. A single service session can be active at once, so one
+shared webcam cannot monitor multiple rooms simultaneously. The C++ and Python
+session records both bind the active session to its room.
 
 Raw camera frames are processed locally and posted only to the loopback face
 service. The C++ API persists enrollment-to-profile metadata, the global
@@ -566,6 +589,9 @@ The relevant API routes are:
 | --- | --- | --- |
 | `GET` | `/api/automation/status` | Read global enablement and active room session |
 | `PUT` | `/api/automation/settings` | Persist `{"enabled":true}` or `{"enabled":false}` |
+| `GET` | `/api/automation/room-settings` | List camera settings for every current room; unconfigured rooms default to disabled |
+| `GET` | `/api/automation/room-settings?roomName={name}` | Read `cameraEnabled` for one room |
+| `PUT` | `/api/automation/room-settings` | Persist `{"roomName":"Bedroom","cameraEnabled":true}` |
 | `GET`, `POST` | `/api/automation/enrollments` | List or register an existing profile with consent |
 | `DELETE` | `/api/automation/enrollments/{id}` | Delete enrollment metadata |
 | `GET` | `/api/automation/events?limit=5` | Read persisted event summaries |
@@ -574,6 +600,12 @@ The relevant API routes are:
 | `POST` | `/api/automation/sessions/{sessionId}/observation` | Send a local recognition observation |
 | `POST` | `/api/automation/sessions/{sessionId}/resolve` | Resolve the accepted enrollment to its profile preferences |
 | `POST` | `/api/profiles/{id}/preferences/apply` | Apply the previewed preferences through the existing C++ device path |
+
+The Python face service exposes `GET /health`; `POST /recognition/sessions`
+starts a room-bound session; `GET /recognition/sessions/{sessionId}` reports
+its room; and `DELETE /recognition/sessions/{sessionId}` stops it. Settings
+are derived from the database's room records, so rooms added later receive the
+same disabled-by-default behavior.
 
 The confirmation request includes `roomName`, `automationSessionId`, and
 `confirmed: true`. The C++ API rechecks the active room, fresh matched identity,
@@ -584,9 +616,12 @@ pending, or ambiguous recognition never resolves preferences. Multiple faces
 are reported as ambiguous and no identity is selected.
 
 On startup, the additive SQLite version 2 migration creates the automation
-tables without rebuilding or seeding existing data. Before migration, the
-backend creates an online backup named
-`smarthome.db.pre-v2-<timestamp>-<number>.bak`; it stops if the backup fails.
+tables without rebuilding or seeding existing data. Migration version 4 adds
+per-room camera opt-in and per-preference automatic-application confirmation
+fields; existing records default to disabled/unconfirmed. Before each
+migration, the backend creates an online backup named
+`smarthome.db.pre-v<version>-<timestamp>-<number>.bak`; it stops if the backup
+fails.
 The local service supports OpenCV Haar detection and LBPH matching, not secure
 authentication or liveness detection. Real camera capture and matching
 accuracy depend on the user's local camera, lighting, and enrollment; neither
@@ -698,7 +733,10 @@ python test_modes_api.py .\SmartHomeAPI-dev.exe
 
 The test makes an SQLite backup of `smarthome.db`, starts the API against that
 temporary copy on an available local port, and discards the copy afterward.
-It does not require or overwrite the active database. Frontend checks are:
+It does not require or overwrite the active database. The API suite checks
+independent camera settings, persistence after restart, room-bound sequential
+sessions, and one newly created room; the session test uses the local face
+service but does not open a physical camera. Frontend checks are:
 
 ```powershell
 npm --prefix frontend run lint

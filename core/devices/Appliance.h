@@ -44,6 +44,7 @@ public:
     virtual std::string getType() const;
     void restoreState(DeviceStatus savedStatus, int savedRuntimeMinutes);
     void setRoom(const std::string& newRoom);
+    void updateDetails(const std::string& newName, int newPowerWatts);
 
     void setLifetime(
         DeviceLifetime deviceLifetime,

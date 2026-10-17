@@ -19,6 +19,13 @@ struct DeviceRecord
 
     int lifetime = 0;
     long long expiryTime = 0;
+    std::string lightType = "standard";
+    int brightness = 100;
+    std::string color = "#FFFFFF";
+    int colorTemperature = 4000;
+    bool supportsBrightness = false;
+    bool supportsColor = false;
+    bool supportsColorTemperature = false;
 };
 
 struct UserProfile
@@ -45,6 +52,7 @@ class Database
 {
 private:
     sqlite3 *db;
+    std::string filename;
 
 public:
     explicit Database(const std::string &filename);
@@ -62,7 +70,7 @@ public:
     bool deleteDevice(const std::string &deviceId);
 
     bool createProfile(const UserProfile &profile);
-    bool profileExists(const std::string &userId);
+    bool profileExists(const std::string &userId) const;
     std::vector<UserProfile> loadProfiles() const;
 
     bool savePreferences(const UserPreferenceRecord &preferences);

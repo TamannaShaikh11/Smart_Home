@@ -23,6 +23,7 @@ smarthome.db
 smarthome.db-journal
 smarthome.db-wal
 smarthome.db-shm
+*.pre-v1-*.bak
 
 # ==============================
 # Compiled C++ output
@@ -53,3 +54,7 @@ Thumbs.db
 database_test.cpp
 smarthome_test.db
 test.cpp
+
+# Python test caches
+__pycache__/
+*.py[cod]

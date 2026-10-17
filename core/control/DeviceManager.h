@@ -53,6 +53,14 @@ public:
 
     void turnOn(const std::string& id);
     void turnOff(const std::string& id);
+    void setDeviceSetting(const std::string& id, int setting);
+    void setLightBrightness(const std::string& id, int brightness);
+    void setLightColor(const std::string& id, const std::string& color);
+    void setLightColorTemperature(const std::string& id, int kelvin);
+    void updateDeviceDetails(
+        const std::string& id,
+        const std::string& name,
+        int powerWatts);
 
     bool showDeviceStatus(const std::string& id);
     void showAllDevices();
@@ -75,4 +83,3 @@ public:
 };
 
 #endif
-

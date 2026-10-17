@@ -1,6 +1,7 @@
 #include "Appliance.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <utility>
 
 Appliance::Appliance(
@@ -120,6 +121,20 @@ void Appliance::setRoom(const std::string& newRoom)
     room = newRoom;
 }
 
+void Appliance::updateDetails(
+    const std::string& newName,
+    int newPowerWatts)
+{
+    if (newName.find_first_not_of(" \t\r\n") == std::string::npos ||
+        newName.size() > 100)
+        throw std::invalid_argument("Device name must contain 1 to 100 characters.");
+    if (newPowerWatts < 1 || newPowerWatts > 100000)
+        throw std::invalid_argument("Rated power must be between 1 and 100000 watts.");
+
+    name = newName;
+    state.powerWatts = newPowerWatts;
+}
+
 void Appliance::setLifetime(
     DeviceLifetime deviceLifetime,
     std::time_t expiry
@@ -138,4 +153,3 @@ std::time_t Appliance::getExpiryTime() const
 {
     return expiryTime;
 }
-

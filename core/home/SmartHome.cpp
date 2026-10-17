@@ -34,6 +34,17 @@ namespace
             static_cast<long long>(device.getExpiryTime());
 
         record.setting = device.getState().setting;
+        if (const auto *light = dynamic_cast<const Light *>(&device))
+        {
+            record.lightType = light->getLightType();
+            record.brightness = light->getBrightness();
+            record.color = light->getColor();
+            record.colorTemperature = light->getColorTemperature();
+            record.supportsBrightness = light->hasBrightnessControl();
+            record.supportsColor = light->hasColorControl();
+            record.supportsColorTemperature =
+                light->hasColorTemperatureControl();
+        }
 
         return record;
     }
@@ -45,11 +56,19 @@ namespace
 
         if (record.type == "Light")
         {
-            device = std::make_unique<Light>(
+            auto light = std::make_unique<Light>(
                 record.id,
                 record.name,
                 record.roomName,
-                record.powerWatts);
+                record.powerWatts,
+                record.lightType);
+            if (light->hasBrightnessControl())
+                light->setBrightness(record.brightness);
+            if (light->hasColorControl())
+                light->setColor(record.color);
+            if (light->hasColorTemperatureControl())
+                light->setColorTemperature(record.colorTemperature);
+            device = std::move(light);
         }
         else if (record.type == "Fan")
         {
@@ -540,19 +559,33 @@ void SmartHome::addTemporaryDevice(
 
 bool SmartHome::removeDevice(const std::string &deviceId)
 {
-    // Close the active energy session before removing the device.
-    if (deviceManager.hasDevice(deviceId))
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        return false;
+
+    if (previous.status == 1 && !energyTracker.endSession(deviceId))
     {
-        if (!energyTracker.endSession(deviceId))
-        {
-            std::cerr
-                << "Warning: Could not close energy session for "
-                << deviceId << '\n';
-        }
+        std::cerr << "Could not close energy session for "
+                  << deviceId << "; device was not removed.\n";
+        return false;
+    }
+
+    if (!database.deleteDevice(deviceId))
+    {
+        if (previous.status == 1 && !energyTracker.startSession(previous))
+            std::cerr << "Could not resume energy session for "
+                      << deviceId << " after failed deletion.\n";
+        return false;
     }
 
     if (!deviceManager.removeDevice(deviceId))
     {
+        if (!database.saveDevice(previous))
+            std::cerr << "Could not restore deleted database record for "
+                      << deviceId << ".\n";
+        if (previous.status == 1 && !energyTracker.startSession(previous))
+            std::cerr << "Could not resume energy session for "
+                      << deviceId << " after failed removal.\n";
         return false;
     }
 
@@ -565,8 +598,6 @@ bool SmartHome::removeDevice(const std::string &deviceId)
         }
     }
 
-    database.deleteDevice(deviceId);
-
     std::cout << "Device removed: "
               << deviceId << '\n';
 
@@ -575,57 +606,244 @@ bool SmartHome::removeDevice(const std::string &deviceId)
 
 void SmartHome::turnOn(const std::string &deviceId)
 {
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+
     deviceManager.turnOn(deviceId);
 
     DeviceRecord record;
 
     if (!deviceManager.getDeviceRecord(deviceId, record))
-    {
-        return;
-    }
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
 
     // Start a new energy session if this device is ON.
     if (record.status == 1)
     {
         if (!energyTracker.startSession(record))
         {
-            std::cerr
-                << "Warning: Could not start energy session for "
-                << deviceId << '\n';
+            if (previous.status != 1)
+                deviceManager.turnOff(deviceId);
+            throw std::runtime_error(
+                "Could not start energy session for " + deviceId);
         }
     }
 
     if (!database.updateDevice(record))
     {
-        std::cerr
-            << "Warning: Could not save device ON state to database.\n";
+        if (previous.status != 1)
+        {
+            deviceManager.turnOff(deviceId);
+            energyTracker.endSession(deviceId);
+        }
+        throw std::runtime_error(
+            "Could not persist device ON state for " + deviceId);
     }
 }
 
 void SmartHome::turnOff(const std::string &deviceId)
 {
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+
     deviceManager.turnOff(deviceId);
 
     // Close the active energy session before saving the OFF state.
     if (!energyTracker.endSession(deviceId))
     {
-        std::cerr
-            << "Warning: Could not close energy session for "
-            << deviceId << '\n';
+        deviceManager.turnOn(deviceId);
+        throw std::runtime_error(
+            "Could not close energy session for " + deviceId);
     }
 
     DeviceRecord record;
 
     if (!deviceManager.getDeviceRecord(deviceId, record))
-    {
-        return;
-    }
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
 
     if (!database.updateDevice(record))
     {
-        std::cerr
-            << "Warning: Could not save device OFF state to database.\n";
+        if (previous.status == 1)
+        {
+            deviceManager.turnOn(deviceId);
+            if (!energyTracker.startSession(previous))
+                std::cerr << "Could not resume energy session for "
+                          << deviceId << " after failed OFF persistence.\n";
+        }
+        throw std::runtime_error(
+            "Could not persist device OFF state for " + deviceId);
     }
+}
+
+bool SmartHome::setDeviceSetting(
+    const std::string &deviceId,
+    int setting)
+{
+    DeviceRecord previous;
+
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+
+    deviceManager.setDeviceSetting(deviceId, setting);
+
+    DeviceRecord updated;
+    if (!deviceManager.getDeviceRecord(deviceId, updated))
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
+
+    if (database.updateDevice(updated))
+        return true;
+
+    try
+    {
+        deviceManager.setDeviceSetting(deviceId, previous.setting);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Could not roll back setting for "
+                  << deviceId << ": " << error.what() << '\n';
+    }
+
+    return false;
+}
+
+bool SmartHome::setLightBrightness(
+    const std::string &deviceId, int brightness)
+{
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+    deviceManager.setLightBrightness(deviceId, brightness);
+    DeviceRecord updated;
+    if (!deviceManager.getDeviceRecord(deviceId, updated))
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
+    if (database.updateDevice(updated))
+        return true;
+    try
+    {
+        deviceManager.setLightBrightness(deviceId, previous.brightness);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Could not roll back light brightness for "
+                  << deviceId << ": " << error.what() << '\n';
+    }
+    return false;
+}
+
+bool SmartHome::setLightColor(
+    const std::string &deviceId, const std::string &color)
+{
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+    deviceManager.setLightColor(deviceId, color);
+    DeviceRecord updated;
+    if (!deviceManager.getDeviceRecord(deviceId, updated))
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
+    if (database.updateDevice(updated))
+        return true;
+    try
+    {
+        deviceManager.setLightColor(deviceId, previous.color);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Could not roll back light color for "
+                  << deviceId << ": " << error.what() << '\n';
+    }
+    return false;
+}
+
+bool SmartHome::setLightColorTemperature(
+    const std::string &deviceId, int kelvin)
+{
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+    deviceManager.setLightColorTemperature(deviceId, kelvin);
+    DeviceRecord updated;
+    if (!deviceManager.getDeviceRecord(deviceId, updated))
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
+    if (database.updateDevice(updated))
+        return true;
+    try
+    {
+        deviceManager.setLightColorTemperature(
+            deviceId, previous.colorTemperature);
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Could not roll back light color temperature for "
+                  << deviceId << ": " << error.what() << '\n';
+    }
+    return false;
+}
+
+bool SmartHome::updateDeviceDetails(
+    const std::string &deviceId,
+    const std::string &name,
+    int powerWatts)
+{
+    DeviceRecord previous;
+    if (!deviceManager.getDeviceRecord(deviceId, previous))
+        throw std::invalid_argument("Device not found: " + deviceId);
+    if (name.empty() || name.size() > 100 ||
+        name.find_first_not_of(" \t\r\n") == std::string::npos)
+        throw std::invalid_argument("Device name must contain 1 to 100 characters.");
+    if (powerWatts < 1 || powerWatts > 100000)
+        throw std::invalid_argument("Rated power must be between 1 and 100000 watts.");
+    if (name == previous.name && powerWatts == previous.powerWatts)
+        return true;
+
+    const bool sessionActive = previous.status == 1;
+    if (sessionActive && !energyTracker.endSession(deviceId))
+        return false;
+
+    deviceManager.updateDeviceDetails(deviceId, name, powerWatts);
+    DeviceRecord updated;
+    if (!deviceManager.getDeviceRecord(deviceId, updated))
+        throw std::invalid_argument("Device no longer exists: " + deviceId);
+
+    if (!database.updateDevice(updated))
+    {
+        try
+        {
+            deviceManager.updateDeviceDetails(
+                deviceId, previous.name, previous.powerWatts);
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Could not roll back device details for "
+                      << deviceId << ": " << error.what() << '\n';
+        }
+        if (sessionActive && !energyTracker.startSession(previous))
+            std::cerr << "Could not resume energy session for "
+                      << deviceId << " after update rollback.\n";
+        return false;
+    }
+
+    if (sessionActive && !energyTracker.startSession(updated))
+    {
+        try
+        {
+            deviceManager.updateDeviceDetails(
+                deviceId, previous.name, previous.powerWatts);
+            if (!database.updateDevice(previous))
+                std::cerr << "Could not restore persisted device details for "
+                          << deviceId << ".\n";
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "Could not restore device details for "
+                      << deviceId << ": " << error.what() << '\n';
+        }
+        if (!energyTracker.startSession(previous))
+            std::cerr << "Could not resume the previous energy session for "
+                      << deviceId << ".\n";
+        return false;
+    }
+    return true;
 }
 
 void SmartHome::showRooms()
@@ -832,15 +1050,23 @@ bool SmartHome::saveUserPreferences(
     const UserPreferenceRecord& preferences)
 {
     if (preferences.userId.empty() ||
-        preferences.roomName.empty())
+        preferences.roomName.empty() ||
+        (preferences.acTemperature != -1 &&
+         (preferences.acTemperature < 16 || preferences.acTemperature > 30)) ||
+        (preferences.heaterTemperature != -1 &&
+         (preferences.heaterTemperature < 20 || preferences.heaterTemperature > 45)) ||
+        (preferences.fanSpeed != -1 &&
+         (preferences.fanSpeed < 1 || preferences.fanSpeed > 5)) ||
+        preferences.lightOn < -1 ||
+        preferences.lightOn > 1)
     {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(homeMutex);
 
-    // Only save preferences for an existing profile.
-    if (!database.profileExists(preferences.userId))
+    if (findRoom(preferences.roomName) == nullptr ||
+        !database.profileExists(preferences.userId))
     {
         return false;
     }
@@ -860,6 +1086,12 @@ bool SmartHome::getUserPreferences(
     }
 
     std::lock_guard<std::mutex> lock(homeMutex);
+
+    if (findRoom(roomName) == nullptr ||
+        !database.profileExists(userId))
+    {
+        return false;
+    }
 
     return database.loadPreferences(
         userId,

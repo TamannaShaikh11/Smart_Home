@@ -57,6 +57,15 @@ public:
 
     void turnOn(const std::string &deviceId);
     void turnOff(const std::string &deviceId);
+    bool setDeviceSetting(const std::string &deviceId, int setting);
+    bool setLightBrightness(const std::string &deviceId, int brightness);
+    bool setLightColor(const std::string &deviceId, const std::string &color);
+    bool setLightColorTemperature(
+        const std::string &deviceId, int kelvin);
+    bool updateDeviceDetails(
+        const std::string &deviceId,
+        const std::string &name,
+        int powerWatts);
 
     bool hasDevice(const std::string &deviceId) const;
 

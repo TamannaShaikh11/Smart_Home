@@ -1,5 +1,9 @@
 #include "DeviceManager.h"
 #include "../storage/Database.h"
+#include "../devices/AC.h"
+#include "../devices/Fan.h"
+#include "../devices/Heater.h"
+#include "../devices/Light.h"
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
@@ -220,6 +224,108 @@ void DeviceManager::turnOff(const std::string& id)
     throw std::invalid_argument("Device not found: " + id);
 }
 
+void DeviceManager::setDeviceSetting(const std::string& id, int setting)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+
+    for (Appliance* device : devices)
+    {
+        if (device->getId() != id)
+            continue;
+
+        if (auto* ac = dynamic_cast<AC*>(device))
+        {
+            ac->setTemperature(setting);
+            return;
+        }
+
+        if (auto* heater = dynamic_cast<Heater*>(device))
+        {
+            heater->setTemperature(setting);
+            return;
+        }
+
+        if (auto* fan = dynamic_cast<Fan*>(device))
+        {
+            fan->setSpeed(setting);
+            return;
+        }
+
+        throw std::invalid_argument(
+            "Device does not support adjustable settings: " + id);
+    }
+
+    throw std::invalid_argument("Device not found: " + id);
+}
+
+void DeviceManager::setLightBrightness(
+    const std::string& id, int brightness)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    for (Appliance* device : devices)
+    {
+        if (device->getId() != id)
+            continue;
+        auto* light = dynamic_cast<Light*>(device);
+        if (light == nullptr)
+            throw std::invalid_argument("Device is not a configurable light: " + id);
+        light->setBrightness(brightness);
+        return;
+    }
+    throw std::invalid_argument("Device not found: " + id);
+}
+
+void DeviceManager::setLightColor(
+    const std::string& id, const std::string& color)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    for (Appliance* device : devices)
+    {
+        if (device->getId() != id)
+            continue;
+        auto* light = dynamic_cast<Light*>(device);
+        if (light == nullptr)
+            throw std::invalid_argument("Device is not a configurable light: " + id);
+        light->setColor(color);
+        return;
+    }
+    throw std::invalid_argument("Device not found: " + id);
+}
+
+void DeviceManager::setLightColorTemperature(
+    const std::string& id, int kelvin)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    for (Appliance* device : devices)
+    {
+        if (device->getId() != id)
+            continue;
+        auto* light = dynamic_cast<Light*>(device);
+        if (light == nullptr)
+            throw std::invalid_argument("Device is not a configurable light: " + id);
+        light->setColorTemperature(kelvin);
+        return;
+    }
+    throw std::invalid_argument("Device not found: " + id);
+}
+
+void DeviceManager::updateDeviceDetails(
+    const std::string& id,
+    const std::string& name,
+    int powerWatts)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    for (Appliance* device : devices)
+    {
+        if (device->getId() == id)
+        {
+            device->updateDetails(name, powerWatts);
+            return;
+        }
+    }
+    throw std::invalid_argument("Device not found: " + id);
+}
+
 
 bool DeviceManager::showDeviceStatus(const std::string& id)
 {
@@ -348,6 +454,17 @@ bool DeviceManager::getDeviceRecord(
 
             record.expiryTime =
                 static_cast<long long>(device->getExpiryTime());
+            if (const auto* light = dynamic_cast<const Light*>(device))
+            {
+                record.lightType = light->getLightType();
+                record.brightness = light->getBrightness();
+                record.color = light->getColor();
+                record.colorTemperature = light->getColorTemperature();
+                record.supportsBrightness = light->hasBrightnessControl();
+                record.supportsColor = light->hasColorControl();
+                record.supportsColorTemperature =
+                    light->hasColorTemperatureControl();
+            }
 
             return true;
         }
@@ -386,6 +503,17 @@ std::vector<DeviceRecord> DeviceManager::getAllDeviceRecords() const
 
         record.expiryTime =
             static_cast<long long>(device->getExpiryTime());
+        if (const auto* light = dynamic_cast<const Light*>(device))
+        {
+            record.lightType = light->getLightType();
+            record.brightness = light->getBrightness();
+            record.color = light->getColor();
+            record.colorTemperature = light->getColorTemperature();
+            record.supportsBrightness = light->hasBrightnessControl();
+            record.supportsColor = light->hasColorControl();
+            record.supportsColorTemperature =
+                light->hasColorTemperatureControl();
+        }
 
         records.push_back(record);
     }

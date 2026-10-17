@@ -2,9 +2,13 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <utility>
+#include <fstream>
+#include <ctime>
 
 Database::Database(const std::string &filename)
-    : db(nullptr)
+    : db(nullptr),
+      filename(filename)
 {
     int result = sqlite3_open(filename.c_str(), &db);
 
@@ -57,6 +61,75 @@ bool Database::initializeSchema()
     if (!execute("PRAGMA foreign_keys = ON;"))
         return false;
 
+    sqlite3_stmt *versionStatement = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1,
+                           &versionStatement, nullptr) != SQLITE_OK)
+        return false;
+    const int schemaVersion =
+        sqlite3_step(versionStatement) == SQLITE_ROW
+            ? sqlite3_column_int(versionStatement, 0)
+            : -1;
+    sqlite3_finalize(versionStatement);
+    if (schemaVersion < 0 || schemaVersion > 1)
+    {
+        std::cerr << "Unsupported database schema version: "
+                  << schemaVersion << '\n';
+        return false;
+    }
+    if (schemaVersion == 0)
+    {
+        const std::time_t createdAt = std::time(nullptr);
+        std::string backupPath;
+        for (int suffix = 0; suffix < 100; ++suffix)
+        {
+            backupPath = filename + ".pre-v1-" +
+                         std::to_string(createdAt) + "-" +
+                         std::to_string(suffix) + ".bak";
+            std::ifstream existingBackup(backupPath, std::ios::binary);
+            if (!existingBackup.good())
+                break;
+            backupPath.clear();
+        }
+        if (backupPath.empty())
+        {
+            std::cerr << "Could not choose a unique pre-migration backup path.\n";
+            return false;
+        }
+
+        sqlite3 *backupDatabase = nullptr;
+        if (sqlite3_open(backupPath.c_str(), &backupDatabase) != SQLITE_OK)
+        {
+            std::cerr << "Could not create pre-migration database backup: "
+                      << (backupDatabase != nullptr
+                              ? sqlite3_errmsg(backupDatabase)
+                              : "unknown SQLite error")
+                      << '\n';
+            if (backupDatabase != nullptr)
+                sqlite3_close(backupDatabase);
+            return false;
+        }
+
+        sqlite3_backup *backup = sqlite3_backup_init(
+            backupDatabase, "main", db, "main");
+        if (backup == nullptr)
+        {
+            std::cerr << "Could not initialize pre-migration backup: "
+                      << sqlite3_errmsg(backupDatabase) << '\n';
+            sqlite3_close(backupDatabase);
+            return false;
+        }
+        const int backupResult = sqlite3_backup_step(backup, -1);
+        const int finishResult = sqlite3_backup_finish(backup);
+        const bool backupSucceeded =
+            backupResult == SQLITE_DONE && finishResult == SQLITE_OK;
+        const int closeResult = sqlite3_close(backupDatabase);
+        if (!backupSucceeded || closeResult != SQLITE_OK)
+        {
+            std::cerr << "Could not complete pre-migration database backup.\n";
+            return false;
+        }
+    }
+
     const char *roomsSql = R"(
         CREATE TABLE IF NOT EXISTS rooms (
             name TEXT PRIMARY KEY
@@ -106,7 +179,63 @@ bool Database::initializeSchema()
     );
 )";
 
-    return execute(profilesSql) && execute(preferencesSql);
+    if (!execute(profilesSql) || !execute(preferencesSql))
+        return false;
+
+    auto hasColumn = [this](const char *columnName) -> bool
+    {
+        sqlite3_stmt *statement = nullptr;
+        if (sqlite3_prepare_v2(
+                db, "PRAGMA table_info(devices);", -1,
+                &statement, nullptr) != SQLITE_OK)
+            return false;
+
+        bool found = false;
+        while (sqlite3_step(statement) == SQLITE_ROW)
+        {
+            const unsigned char *name = sqlite3_column_text(statement, 1);
+            if (name != nullptr &&
+                std::string(reinterpret_cast<const char *>(name)) == columnName)
+            {
+                found = true;
+                break;
+            }
+        }
+        sqlite3_finalize(statement);
+        return found;
+    };
+
+    if (!execute("BEGIN IMMEDIATE;"))
+        return false;
+
+    bool migrationSucceeded = true;
+    const std::vector<std::pair<const char *, const char *>> additions = {
+        {"light_type",
+         "ALTER TABLE devices ADD COLUMN light_type TEXT NOT NULL DEFAULT 'standard';"},
+        {"brightness",
+         "ALTER TABLE devices ADD COLUMN brightness INTEGER NOT NULL DEFAULT 100;"},
+        {"color",
+         "ALTER TABLE devices ADD COLUMN color TEXT NOT NULL DEFAULT '#FFFFFF';"},
+        {"color_temperature",
+         "ALTER TABLE devices ADD COLUMN color_temperature INTEGER NOT NULL DEFAULT 4000;"}};
+
+    for (const auto &addition : additions)
+    {
+        if (!hasColumn(addition.first) && !execute(addition.second))
+        {
+            migrationSucceeded = false;
+            break;
+        }
+    }
+
+    if (migrationSucceeded)
+        migrationSucceeded = execute("PRAGMA user_version = 1;");
+    if (migrationSucceeded)
+        migrationSucceeded = execute("COMMIT;");
+    else
+        execute("ROLLBACK;");
+
+    return migrationSucceeded;
 }
 
 bool Database::saveRoom(const std::string &roomName)
@@ -145,8 +274,9 @@ bool Database::saveDevice(const DeviceRecord &device)
         INSERT OR REPLACE INTO devices (
             id, name, device_type, room_name,
             status, power_watts, setting, runtime_minutes,
-            lifetime, expiry_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            lifetime, expiry_time, light_type, brightness, color,
+            color_temperature
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     )";
 
     sqlite3_stmt *stmt = nullptr;
@@ -168,6 +298,10 @@ bool Database::saveDevice(const DeviceRecord &device)
     sqlite3_bind_int(stmt, 8, device.runtimeMinutes);
     sqlite3_bind_int(stmt, 9, device.lifetime);
     sqlite3_bind_int64(stmt, 10, device.expiryTime);
+    sqlite3_bind_text(stmt, 11, device.lightType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 12, device.brightness);
+    sqlite3_bind_text(stmt, 13, device.color.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 14, device.colorTemperature);
 
     int result = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -194,7 +328,11 @@ bool Database::updateDevice(const DeviceRecord &device)
             setting = ?,
             runtime_minutes = ?,
             lifetime = ?,
-            expiry_time = ?
+            expiry_time = ?,
+            light_type = ?,
+            brightness = ?,
+            color = ?,
+            color_temperature = ?
         WHERE id = ?;
     )";
 
@@ -216,7 +354,11 @@ bool Database::updateDevice(const DeviceRecord &device)
     sqlite3_bind_int(stmt, 7, device.runtimeMinutes);
     sqlite3_bind_int(stmt, 8, device.lifetime);
     sqlite3_bind_int64(stmt, 9, device.expiryTime);
-    sqlite3_bind_text(stmt, 10, device.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, device.lightType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 11, device.brightness);
+    sqlite3_bind_text(stmt, 12, device.color.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 13, device.colorTemperature);
+    sqlite3_bind_text(stmt, 14, device.id.c_str(), -1, SQLITE_TRANSIENT);
 
     int result = sqlite3_step(stmt);
     int changed = sqlite3_changes(db);
@@ -314,7 +456,8 @@ std::vector<DeviceRecord> Database::loadDevices()
     const char *sql = R"(
         SELECT id, name, device_type, room_name,
                status, power_watts, setting, runtime_minutes,
-               lifetime, expiry_time
+               lifetime, expiry_time, light_type, brightness, color,
+               color_temperature
         FROM devices
         ORDER BY id;
     )";
@@ -352,6 +495,10 @@ std::vector<DeviceRecord> Database::loadDevices()
         device.runtimeMinutes = sqlite3_column_int(stmt, 7);
         device.lifetime = sqlite3_column_int(stmt, 8);
         device.expiryTime = sqlite3_column_int64(stmt, 9);
+        device.lightType = readText(10);
+        device.brightness = sqlite3_column_int(stmt, 11);
+        device.color = readText(12);
+        device.colorTemperature = sqlite3_column_int(stmt, 13);
 
         devices.push_back(device);
     }
@@ -413,6 +560,14 @@ bool Database::renameRoom(
     {
         success = runUpdate(
             "UPDATE devices SET room_name = ? "
+            "WHERE room_name = ?;",
+            newName, oldName);
+    }
+
+    if (success)
+    {
+        success = runUpdate(
+            "UPDATE user_preferences SET room_name = ? "
             "WHERE room_name = ?;",
             newName, oldName);
     }
@@ -502,7 +657,7 @@ bool Database::createProfile(const UserProfile& profile)
     return true;
 }
 
-bool Database::profileExists(const std::string& userId)
+bool Database::profileExists(const std::string& userId) const
 {
     const char* sql =
         "SELECT 1 FROM user_profiles WHERE id = ? LIMIT 1;";
@@ -570,6 +725,14 @@ bool Database::savePreferences(
 {
     if (preferences.userId.empty() ||
         preferences.roomName.empty() ||
+        (preferences.acTemperature != -1 &&
+         (preferences.acTemperature < 16 || preferences.acTemperature > 30)) ||
+        (preferences.heaterTemperature != -1 &&
+         (preferences.heaterTemperature < 20 || preferences.heaterTemperature > 45)) ||
+        (preferences.fanSpeed != -1 &&
+         (preferences.fanSpeed < 1 || preferences.fanSpeed > 5)) ||
+        preferences.lightOn < -1 ||
+        preferences.lightOn > 1 ||
         !profileExists(preferences.userId))
         return false;
 

@@ -593,12 +593,107 @@ accuracy depend on the user's local camera, lighting, and enrollment; neither
 is guaranteed by these tests. Device changes operate the SmartHomeOS simulator,
 not physical appliances.
 
+### Season and mood modes
+
+The **Season & Mood Modes** page provides four manually selected suggested
+season presets (Summer, Monsoon, Winter, Spring) and six mood overlays (Focus /
+Study, Relax, Romantic, Movie Night, Sleep, Energize). These are configurable
+suggestions, not weather detection or medical/environmental advice. Seasonal
+defaults vary by room category where appropriate; unsupported properties are
+shown as skipped. Mood values override a seasonal value only for the same
+device and property. User-created overrides target one existing device and
+property and are validated against that device's real simulated capability.
+For example, standard non-dimmable lights do not accept brightness, color, or
+color-temperature settings. AC operating modes are not implemented.
+
+Select one room, then choose a season and/or mood. The preview includes every
+registered device in that room, including explicit ON, OFF, CONFIGURE_ONLY,
+and KEEP_CURRENT policies, supported property changes, and skipped settings.
+The user confirms with **Apply Mode**. A preview token expires after five
+minutes and is single-use; applying rejects it if relevant device values or
+preset overrides changed since preview. Manual controls remain available and
+saved profile preferences are never modified. Each preset supports a
+device-ID-specific policy override and property overrides; the backend checks
+device existence, capabilities, and ranges. Unsupported settings are reported
+as skipped rather than being sent through an incompatible control.
+
+Suggested default policies are:
+
+* **Summer:** ACs and fans ON with room-aware temperature/speed settings;
+  heaters OFF; lights KEEP_CURRENT.
+* **Monsoon:** fans ON with room-aware speeds; ACs CONFIGURE_ONLY with a
+  room-aware setpoint (their power state is preserved); heaters and lights
+  KEEP_CURRENT. No humidity or rain is measured.
+* **Winter:** heaters ON with room-aware temperatures; ACs OFF; fans
+  CONFIGURE_ONLY at a low/moderate speed; lights KEEP_CURRENT.
+* **Spring:** ACs and heaters OFF; fans CONFIGURE_ONLY at a moderate speed;
+  lights KEEP_CURRENT.
+* **Focus / Study:** study-room lights ON with supported bright/neutral
+  settings and fan ON with the configured speed.
+* **Relax:** lights and bedroom/living fans ON with supported softer settings.
+* **Romantic:** ambient-capable lights ON with supported warm/color settings;
+  unsupported standard lights are left unchanged.
+* **Movie Night:** dimmable lights ON at low brightness; other devices stay
+  unchanged.
+* **Sleep:** bedroom lights OFF; bedroom fan ON at a low setting; other devices
+  stay unchanged.
+* **Energize:** study/living lights and fans ON with supported bright and
+  fan-speed settings.
+
+When both are selected, a mood's explicit device policy overlays the seasonal
+policy for that device; mood settings overlay only matching device properties.
+Policy overrides use
+`{"deviceId":"LIVING_RGB","property":"policy","value":"CONFIGURE_ONLY"}`.
+Supported settings include `setting` (AC 16–30 °C, fan 1–5, heater 20–45 °C),
+`brightness` (0–100), `color` (`#RRGGBB`), and `colorTemperature`
+(2700–6500 K). The legacy `power` boolean property remains accepted as an
+ON/OFF override.
+
+Successful or partial applications record per-property outcomes and a snapshot
+of every targeted device's supported state/settings immediately before the
+changes. **Restore previous state** restores the latest unapplied snapshot for the selected room through
+the C++ device control and persistence paths; it does not assume a universal
+default. Failed restores remain retryable. The UI refreshes device state after
+the backend reports the per-device results. Reapplying a mode with no changes
+records the first no-change outcome for that combination and scope, but does
+not create duplicate consecutive no-change history entries. Energy effects
+are not calculated: the existing monitor estimates consumption from rated
+watts and ON duration, not from adjustable temperatures, fan speeds, or
+lighting settings.
+
+Mode API routes:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/modes/seasons` | List seasonal presets and saved device overrides |
+| `GET` | `/api/modes/moods` | List mood presets and saved device overrides |
+| `PUT` | `/api/modes/presets/{type}/{id}` | Replace a preset's device-specific `overrides` (`type` is `season` or `mood`) |
+| `POST` | `/api/modes/preview` | Preview `{ "seasonId":"summer", "moodId":"relax", "roomNames":["Bedroom"], "deviceIds":[] }`; use an empty ID for an unselected mode |
+| `POST` | `/api/modes/apply` | Apply a returned `previewId` with `{"previewId":"…","confirmed":true}` |
+| `POST` | `/api/modes/restore` | Restore the latest snapshot; provide `{"confirmed":true,"roomName":"Bedroom"}` for room scope |
+| `GET` | `/api/modes/history?limit=50` | Read persisted application and restoration outcomes |
+
+A property customization override has the shape
+`{"deviceId":"LIVING_RGB","property":"brightness","value":35}`. Supported
+properties also include `policy` (`ON`, `OFF`, `KEEP_CURRENT`, or
+`CONFIGURE_ONLY`). `power` (boolean), `setting` (AC 16–30 °C, fan 1–5, heater
+20–45 °C), `brightness` (0–100), `color` (`#RRGGBB`), and `colorTemperature`
+(2700–6500 K), limited to capabilities reported by the device API. The
+backend validates every override and every proposed change.
+
+The additive SQLite version 3 migration creates `mode_presets` and
+`mode_history`; it does not rebuild or seed existing records. Before migration
+the backend creates an online backup named
+`smarthome.db.pre-v3-<timestamp>-<number>.bak` and stops if backup creation
+fails. Start the API from the repository root as documented above.
+
 ### Verification
 
 Run the isolated API integration suite with a separately built executable:
 
 ```powershell
 python test_profile_preferences_api.py .\SmartHomeAPI-dev.exe
+python test_modes_api.py .\SmartHomeAPI-dev.exe
 ```
 
 The test makes an SQLite backup of `smarthome.db`, starts the API against that

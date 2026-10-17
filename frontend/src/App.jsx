@@ -81,6 +81,19 @@ function formatDate(timestamp) {
   });
 }
 
+function formatModeActionValue(action, value) {
+  if (action.property === "policy") return String(value);
+  if (action.property === "power" && typeof value === "boolean")
+    return value ? "ON" : "OFF";
+  if (action.property === "brightness") return `${value}%`;
+  if (action.property === "colorTemperature") return `${value} K`;
+  if (action.property === "setting") {
+    if (action.deviceType === "Fan") return `Speed ${value}`;
+    if (["AC", "Heater"].includes(action.deviceType)) return `${value}°C`;
+  }
+  return String(value ?? "unknown");
+}
+
 function calculateBill(units, tariff) {
   const first = Math.min(units, 100);
   const second = Math.min(Math.max(units - 100, 0), 200);
@@ -172,8 +185,28 @@ function App() {
 
   const [showTariffSettings, setShowTariffSettings] = useState(false);
   const [activeSection, setActiveSection] = useState("overview");
+  const [seasonPresets, setSeasonPresets] = useState([]);
+  const [moodPresets, setMoodPresets] = useState([]);
+  const [modeHistory, setModeHistory] = useState([]);
+  const [selectedSeasonId, setSelectedSeasonId] = useState("");
+  const [selectedMoodId, setSelectedMoodId] = useState("");
+  const [modeTargetRooms, setModeTargetRooms] = useState([]);
+  const [modePreview, setModePreview] = useState(null);
+  const [modeApplicationResult, setModeApplicationResult] = useState(null);
+  const [modePreviewBusy, setModePreviewBusy] = useState(false);
+  const [modeApplyBusy, setModeApplyBusy] = useState(false);
+  const [modeConfirming, setModeConfirming] = useState(false);
+  const [modeRestoring, setModeRestoring] = useState(false);
+  const [modeError, setModeError] = useState("");
+  const [modeMessage, setModeMessage] = useState("");
+  const [modePresetType, setModePresetType] = useState("season");
+  const [modePresetId, setModePresetId] = useState("");
+  const [modeRuleDeviceId, setModeRuleDeviceId] = useState("");
+  const [modeRuleProperty, setModeRuleProperty] = useState("");
+  const [modeRuleValue, setModeRuleValue] = useState("");
+  const [modePresetBusy, setModePresetBusy] = useState(false);
 
-  const fetchJson = async (url, options = {}) => {
+  const fetchJson = useCallback(async (url, options = {}) => {
     const response = await fetch(url, options);
 
     if (!response.ok) {
@@ -181,7 +214,7 @@ function App() {
     }
 
     return response.json();
-  };
+  }, []);
 
   const stopCamera = async (finalStatus = "disabled") => {
     const session = cameraSessionRef.current;
@@ -472,7 +505,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [fetchJson]);
 
   const loadProfiles = useCallback(async () => {
     setProfilesLoading(true);
@@ -489,7 +522,7 @@ function App() {
     } finally {
       setProfilesLoading(false);
     }
-  }, []);
+  }, [fetchJson]);
 
   const refreshAutomationMetadata = async () => {
     const [enrollmentData, eventData] = await Promise.all([
@@ -800,6 +833,7 @@ function App() {
   }, [
     automationSession,
     cameraStream,
+    fetchJson,
     roomOperatingMode,
   ]);
 
@@ -877,8 +911,219 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchJson]);
 
+  const loadModeData = useCallback(async () => {
+    try {
+      const [seasons, moods, history] = await Promise.all([
+        fetchJson(`${API_URL}/modes/seasons`),
+        fetchJson(`${API_URL}/modes/moods`),
+        fetchJson(`${API_URL}/modes/history?limit=50`),
+      ]);
+      setSeasonPresets(Array.isArray(seasons) ? seasons : []);
+      setMoodPresets(Array.isArray(moods) ? moods : []);
+      setModeHistory(Array.isArray(history) ? history : []);
+      setModeError("");
+    } catch (err) {
+      setModeError(`Could not load Season & Mood Modes: ${err.message}`);
+    }
+  }, [fetchJson]);
+
+  useEffect(() => {
+    if (activeSection === "modes") void loadModeData();
+  }, [activeSection, loadModeData]);
+
+  useEffect(() => {
+    const availableRooms = rooms.map(getRoomLabel).filter(Boolean);
+    if (availableRooms.length === 0) {
+      if (modeTargetRooms.length > 0) setModeTargetRooms([]);
+      return;
+    }
+    if (modeTargetRooms.length > 1) {
+      setModeTargetRooms(modeTargetRooms.slice(0, 1));
+    } else if (
+      modeTargetRooms.length === 1 &&
+      !availableRooms.includes(modeTargetRooms[0])
+    ) {
+      setModeTargetRooms([]);
+    }
+  }, [rooms, modeTargetRooms]);
+
+  const buildModeSelection = () => ({
+    seasonId: selectedSeasonId,
+    moodId: selectedMoodId,
+    roomNames: modeTargetRooms,
+    deviceIds: [],
+  });
+
+  const generateModePreview = async () => {
+    setModePreviewBusy(true);
+    setModeError("");
+    setModeMessage("");
+    setModeApplicationResult(null);
+    setModeConfirming(false);
+    try {
+      const preview = await fetchJson(`${API_URL}/modes/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildModeSelection()),
+      });
+      setModePreview(preview);
+    } catch (err) {
+      setModePreview(null);
+      setModeError(`Could not generate mode preview: ${err.message}`);
+    } finally {
+      setModePreviewBusy(false);
+    }
+  };
+
+  const cancelModePreview = () => {
+    setModePreview(null);
+    setModeConfirming(false);
+    setModeMessage("Preview cancelled. No device settings were changed.");
+  };
+
+  const confirmModeApplication = async () => {
+    if (!modePreview?.previewId) return;
+    setModeApplyBusy(true);
+    setModeError("");
+    try {
+      const result = await fetchJson(`${API_URL}/modes/apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          previewId: modePreview.previewId,
+          confirmed: true,
+        }),
+      });
+      setModePreview(null);
+      setModeConfirming(false);
+      setModeMessage(
+        result.outcome === "applied"
+          ? `Mode applied successfully (${result.summary?.applied ?? 0} setting changes).`
+          : result.outcome === "partial"
+            ? `Mode applied partially: ${result.summary?.applied ?? 0} changed, ${result.summary?.skipped ?? 0} skipped, ${result.summary?.failed ?? 0} failed. Review each result below.`
+            : result.message ?? "No device changes were needed."
+      );
+      setModeApplicationResult(result);
+      await Promise.all([loadDashboard(false), loadModeData()]);
+    } catch (err) {
+      setModeError(`Could not apply the confirmed mode: ${err.message}`);
+      setModeConfirming(false);
+    } finally {
+      setModeApplyBusy(false);
+    }
+  };
+
+  const restorePreviousMode = async () => {
+    setModeRestoring(true);
+    setModeError("");
+    try {
+      const result = await fetchJson(`${API_URL}/modes/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmed: true,
+          roomName: modeTargetRooms[0],
+        }),
+      });
+      setModeMessage(
+        result.success
+          ? "The previous device settings were restored."
+          : "Restore was partial. Review the per-device result in history."
+      );
+      await Promise.all([loadDashboard(false), loadModeData()]);
+    } catch (err) {
+      setModeError(`Could not restore the previous mode state: ${err.message}`);
+    } finally {
+      setModeRestoring(false);
+      setModeConfirming(false);
+    }
+  };
+
+  const modePresetOptions =
+    modePresetType === "season" ? seasonPresets : moodPresets;
+  const modeRuleDevice = devices.find(
+    (device) => (device.id ?? device.deviceId) === modeRuleDeviceId
+  );
+  const modeRuleProperties = modeRuleDevice
+    ? [
+      "policy",
+      ...(["AC", "Fan", "Heater"].includes(modeRuleDevice.type) ? ["setting"] : []),
+      ...(modeRuleDevice.capabilities?.includes("brightness") ? ["brightness"] : []),
+      ...(modeRuleDevice.capabilities?.includes("color") ? ["color"] : []),
+      ...(modeRuleDevice.capabilities?.includes("colorTemperature")
+        ? ["colorTemperature"]
+        : []),
+    ]
+    : [];
+
+  const saveModePresetOverrides = async (event) => {
+    event.preventDefault();
+    if (!modePresetType || !modePresetId || !modeRuleDeviceId ||
+        !modeRuleProperty || modeRuleValue === "") {
+      setModeError("Choose a preset, device, supported property, and value.");
+      return;
+    }
+    setModePresetBusy(true);
+    setModeError("");
+    setModeMessage("");
+    try {
+      const presets = modePresetType === "season" ? seasonPresets : moodPresets;
+      const preset = presets.find((item) => item.id === modePresetId);
+      const property = modeRuleProperty;
+      let value = modeRuleValue;
+      if (property === "policy") value = modeRuleValue;
+      else if (property !== "color") value = Number(modeRuleValue);
+      const nextOverrides = [
+        ...(preset?.overrides ?? []).filter(
+          (rule) => !(rule.deviceId === modeRuleDeviceId && rule.property === property)
+        ),
+        { deviceId: modeRuleDeviceId, property, value },
+      ];
+      await fetchJson(
+        `${API_URL}/modes/presets/${modePresetType}/${encodeURIComponent(modePresetId)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ overrides: nextOverrides }),
+        }
+      );
+      setModeRuleValue("");
+      setModeMessage(`Saved a device-specific customization for ${preset?.label ?? modePresetId}.`);
+      await loadModeData();
+      setModePreview(null);
+    } catch (err) {
+      setModeError(`Could not save the preset customization: ${err.message}`);
+    } finally {
+      setModePresetBusy(false);
+    }
+  };
+
+  const removeModePresetOverride = async (presetType, presetId, deviceId, property) => {
+    const presets = presetType === "season" ? seasonPresets : moodPresets;
+    const preset = presets.find((item) => item.id === presetId);
+    if (!preset) return;
+    setModePresetBusy(true);
+    setModeError("");
+    try {
+      const overrides = preset.overrides.filter(
+        (rule) => !(rule.deviceId === deviceId && rule.property === property)
+      );
+      await fetchJson(`${API_URL}/modes/presets/${presetType}/${encodeURIComponent(presetId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrides }),
+      });
+      setModeMessage(`Removed the ${property} customization from ${preset.label}.`);
+      await loadModeData();
+      setModePreview(null);
+    } catch (err) {
+      setModeError(`Could not remove the preset customization: ${err.message}`);
+    } finally {
+      setModePresetBusy(false);
+    }
+  };
 
   const activePreferenceRoom = rooms.some(
     (room) => getRoomLabel(room) === preferenceRoom
@@ -1159,7 +1404,7 @@ function App() {
     } finally {
       setEnergyLoading(false);
     }
-  }, []);
+  }, [fetchJson]);
 
   const loadEnergySummary = useCallback(async () => {
     try {
@@ -1171,7 +1416,7 @@ function App() {
     } finally {
       setEnergySummaryLoading(false);
     }
-  }, []);
+  }, [fetchJson]);
 
   useEffect(() => {
     const initialLoad = setTimeout(() => {
@@ -1793,6 +2038,35 @@ function App() {
       <p className="stat-detail">{detail}</p>
     </article>
   );
+  const targetModeDevices = devices.filter((device) =>
+    modeTargetRooms.length === 1 &&
+    modeTargetRooms[0] === getRoomName(device)
+  );
+  const activeModePreset = (modePresetType === "season"
+    ? seasonPresets
+    : moodPresets
+  ).find((preset) => preset.id === modePresetId);
+  const modeResultActions = modeApplicationResult?.actions ?? [];
+  const modeResultCounts = {
+    turnedOn: modeResultActions.filter(
+      (action) => action.property === "power" &&
+        action.status === "applied" && action.value === true
+    ).length,
+    turnedOff: modeResultActions.filter(
+      (action) => action.property === "power" &&
+        action.status === "applied" && action.value === false
+    ).length,
+    configured: modeResultActions.filter(
+      (action) => !["power", "policy"].includes(action.property) &&
+        action.status === "applied"
+    ).length,
+    unchanged: modeResultActions.filter(
+      (action) => action.status === "unchanged"
+    ).length,
+    failed: modeResultActions.filter(
+      (action) => action.status === "failed"
+    ).length,
+  };
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1810,6 +2084,7 @@ function App() {
             ["overview", "◫", "Overview"],
             ["devices", "⌁", "Devices"],
             ["rooms", "⌂", "Room management"],
+            ["modes", "◐", "Season & Mood Modes"],
             ["energy", "ϟ", "Energy monitor"],
             ["assistant", "✦", "Energy assistant"],
             ["camera", "◉", "Face enrollments"],
@@ -2246,6 +2521,210 @@ function App() {
             const meta = roomMeta(name);
             return <article className="room-management-card" key={name}><span className={`room-emoji ${meta.tint}`}>{meta.icon}</span>{editingRoom === name ? <form onSubmit={renameRoom} className="rename-form"><input value={editingRoomName} onChange={(e) => setEditingRoomName(e.target.value)} autoFocus required /><div><button className="primary-button" disabled={roomBusy}>Save</button><button type="button" className="secondary-button" onClick={() => setEditingRoom(null)}>Cancel</button></div></form> : <><div className="room-management-info"><h3>{name}</h3><p>{count} {count === 1 ? "device" : "devices"}</p></div><div className="room-management-actions"><button className="secondary-button" onClick={() => { setEditingRoom(name); setEditingRoomName(name); setRoomMessage(""); }}>Rename</button><button className="secondary-button danger-button" disabled={roomBusy || count > 0} title={count ? "Remove devices from this room first" : "Delete empty room"} onClick={() => deleteRoom(name)}>Delete</button></div></>}</article>;
           })}</div>
+        </section>}
+
+        {activeSection === "modes" && <section id="modes" className="content-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">USER-SELECTED SIMULATED MODES</p>
+              <h2>Season &amp; Mood Modes</h2>
+              <p className="section-subtitle">Choose one room, then a seasonal baseline and optional mood overlay. Review the explicit power policy and settings for every registered device before applying.</p>
+            </div>
+          </div>
+          {modeError && <div className="alert alert-error" role="alert">{modeError}</div>}
+          {modeMessage && <div className="form-message is-success" role="status">{modeMessage}</div>}
+          <div className="panel mode-disclaimer">
+            These are suggested, user-selected presets—not weather detection, medical or environmental advice, or control of physical appliances. Manual device controls remain available. Existing energy estimates use rated watts and recorded ON time; the current model cannot defensibly calculate energy implications from a mode setting.
+          </div>
+
+          <section className="panel mode-preset-panel" aria-labelledby="season-presets-heading">
+            <div className="mode-panel-heading">
+              <div><p className="eyebrow">OPTIONAL BASELINE</p><h3 id="season-presets-heading">Season</h3></div>
+              {selectedSeasonId && <button className="text-button" type="button" onClick={() => { setSelectedSeasonId(""); setModePreview(null); }}>Clear season</button>}
+            </div>
+            <div className="mode-preset-grid">
+              {seasonPresets.map((preset) => <button
+                type="button"
+                key={preset.id}
+                className={`mode-preset-card ${selectedSeasonId === preset.id ? "mode-preset-selected" : ""}`}
+                aria-pressed={selectedSeasonId === preset.id}
+                onClick={() => { setSelectedSeasonId(selectedSeasonId === preset.id ? "" : preset.id); setModePreview(null); setModeApplicationResult(null); setModeConfirming(false); }}
+              >
+                <strong>{preset.label}</strong><span>{preset.description}</span>
+                <small>{preset.overrides.length ? `${preset.overrides.length} saved device customization${preset.overrides.length === 1 ? "" : "s"}` : "Suggested defaults"}</small>
+              </button>)}
+            </div>
+          </section>
+
+          <section className="panel mode-preset-panel" aria-labelledby="mood-presets-heading">
+            <div className="mode-panel-heading">
+              <div><p className="eyebrow">OPTIONAL OVERLAY</p><h3 id="mood-presets-heading">Mood</h3></div>
+              {selectedMoodId && <button className="text-button" type="button" onClick={() => { setSelectedMoodId(""); setModePreview(null); }}>Clear mood</button>}
+            </div>
+            <div className="mode-preset-grid mode-mood-grid">
+              {moodPresets.map((preset) => <button
+                type="button"
+                key={preset.id}
+                className={`mode-preset-card ${selectedMoodId === preset.id ? "mode-preset-selected" : ""}`}
+                aria-pressed={selectedMoodId === preset.id}
+                onClick={() => { setSelectedMoodId(selectedMoodId === preset.id ? "" : preset.id); setModePreview(null); setModeApplicationResult(null); setModeConfirming(false); }}
+              >
+                <strong>{preset.label}</strong><span>{preset.description}</span>
+                <small>{preset.overrides.length ? `${preset.overrides.length} saved device customization${preset.overrides.length === 1 ? "" : "s"}` : "Suggested defaults"}</small>
+              </button>)}
+            </div>
+          </section>
+
+          <section className="panel mode-target-panel">
+            <div className="mode-panel-heading"><div><p className="eyebrow">ROOM SCOPE</p><h3>Select one room</h3></div></div>
+            <label className="mode-room-select">Room
+              <select
+                value={modeTargetRooms[0] ?? ""}
+                onChange={(event) => {
+                  setModeTargetRooms(event.target.value ? [event.target.value] : []);
+                  setModePreview(null);
+                  setModeConfirming(false);
+                  setModeApplicationResult(null);
+                }}
+                disabled={modeApplyBusy || modePreviewBusy}
+              >
+                <option value="">Select a room</option>
+                {rooms.map((room) => {
+                  const name = getRoomLabel(room);
+                  return name ? <option value={name} key={name}>{name}</option> : null;
+                })}
+              </select>
+            </label>
+            <div className="mode-target-list" aria-label="All devices included in this room">
+              {targetModeDevices.map((device) => <div className="mode-target-option" key={getDeviceId(device)}>
+                <span>{getDeviceName(device)} <small>{device.type} · {getDeviceId(device)}</small></span>
+              </div>)}
+              {modeTargetRooms.length === 1 && targetModeDevices.length === 0 &&
+                <p className="fine-print">No devices are registered in this room. The mode can be reviewed, but there are no device actions.</p>}
+            </div>
+            <div className="mode-target-summary">
+              Target: {modeTargetRooms[0] ?? "Select a room"} · all {targetModeDevices.length} registered device{targetModeDevices.length === 1 ? "" : "s"}
+            </div>
+          </section>
+
+          <div className="mode-workflow-actions">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={modePreviewBusy || !modeTargetRooms[0] || (!selectedSeasonId && !selectedMoodId)}
+              onClick={generateModePreview}
+            >{modePreviewBusy ? "Preparing preview…" : "Preview mode changes"}</button>
+            {modePreview && <button className="secondary-button" type="button" onClick={cancelModePreview}>Cancel preview</button>}
+            {modeHistory.some((item) => item.canRestore &&
+              item.selection?.roomNames?.includes(modeTargetRooms[0])) && <button
+              className="secondary-button"
+              type="button"
+              disabled={modeRestoring}
+              onClick={() => setModeRestoring(true)}
+            >{modeRestoring ? "Restoring…" : `Restore previous state${modeTargetRooms[0] ? ` · ${modeTargetRooms[0]}` : ""}`}</button>}
+          </div>
+
+          {modePreview && <section className="panel mode-preview-panel" aria-labelledby="mode-preview-heading">
+            <div className="mode-panel-heading"><div><p className="eyebrow">REVIEW BEFORE APPLYING</p><h3 id="mode-preview-heading">Complete device action plan</h3><p className="section-subtitle">{[modePreview.seasonLabel, modePreview.moodLabel].filter(Boolean).join(" baseline + ")} · {modePreview.roomNames.join(", ")}</p></div></div>
+            <div className="mode-preview-summary">
+              <span>Proposed <strong>{modePreview.summary.proposed}</strong></span>
+              <span>Skipped <strong>{modePreview.summary.skipped}</strong></span>
+              <span>Already unchanged <strong>{modePreview.summary.unchanged}</strong></span>
+            </div>
+            {modePreview.summary.message && <p className="form-message">{modePreview.summary.message}</p>}
+            {modePreview.actions.length > 0 && <div className="mode-action-list">
+              {modePreview.actions.map((action, index) => <article className={`mode-action-row mode-action-${action.status}`} key={`${action.deviceId}-${action.property}-${index}`}>
+                <div className="mode-action-heading">
+                  <strong>{action.deviceName || action.deviceId || "Device"} <small>{action.roomName}</small></strong>
+                  <span>{action.status.replace("_", " ")}</span>
+                </div>
+                {action.property === "policy"
+                  ? <p><b>Device policy</b>: {action.value}</p>
+                  : <p><b>{action.property === "setting" && action.deviceType === "Fan" ? "Fan speed" : action.property === "setting" ? "Temperature" : action.property}</b>: {formatModeActionValue(action, action.previousValue)} → {formatModeActionValue(action, action.value)}</p>}
+                <small>{action.reason}{action.source ? ` · ${action.source === "mood" ? "Mood overlay" : action.source === "season" ? "Season baseline" : "Custom override"}` : ""}</small>
+              </article>)}
+            </div>}
+            {modeConfirming ? <div className="mode-confirmation" role="alertdialog" aria-label="Confirm applying selected modes">
+              <p>Confirm applying these simulated settings to the listed devices? This does not change saved profile preferences.</p>
+              <button className="primary-button" type="button" disabled={modeApplyBusy || modePreview.summary.proposed === 0} onClick={confirmModeApplication}>{modeApplyBusy ? "Applying mode…" : "Apply Mode"}</button>
+              <button className="secondary-button" type="button" disabled={modeApplyBusy} onClick={() => setModeConfirming(false)}>Keep preview</button>
+            </div> : <button className="primary-button" type="button" disabled={modePreviewBusy || modePreview.summary.proposed === 0} onClick={() => setModeConfirming(true)}>Review confirmation</button>}
+          </section>}
+
+          {modeApplicationResult && <section className="panel mode-result-panel" aria-live="polite">
+            <div className="mode-panel-heading"><div><p className="eyebrow">BACKEND-CONFIRMED RESULT</p><h3>Device action results</h3></div></div>
+            <div className="mode-preview-summary">
+              <span>Turned ON <strong>{modeResultCounts.turnedOn}</strong></span>
+              <span>Turned OFF <strong>{modeResultCounts.turnedOff}</strong></span>
+              <span>Settings changed <strong>{modeResultCounts.configured}</strong></span>
+              <span>Unchanged <strong>{modeResultCounts.unchanged}</strong></span>
+              <span>Failed <strong>{modeResultCounts.failed}</strong></span>
+            </div>
+            <div className="mode-action-list">
+              {modeResultActions.map((action, index) => <article className={`mode-action-row mode-action-${action.status}`} key={`result-${action.deviceId}-${action.property}-${index}`}>
+                <div className="mode-action-heading">
+                  <strong>{action.deviceName || action.deviceId} <small>{action.roomName}</small></strong>
+                  <span>{action.status.replace("_", " ")}</span>
+                </div>
+                <p>{action.property === "policy"
+                  ? `Device policy: ${action.value}`
+                  : `${action.property}: ${formatModeActionValue(action, action.previousValue)} → ${formatModeActionValue(action, action.value)}`}</p>
+                {action.reason && <small>{action.reason}</small>}
+              </article>)}
+            </div>
+          </section>}
+
+          {modeRestoring && <div className="mode-confirmation mode-restore-confirmation" role="alertdialog" aria-label="Confirm restoring previous mode state">
+            <p>Restore the device properties captured immediately before the latest unrestored mode application?</p>
+            <button className="primary-button" type="button" onClick={restorePreviousMode}>Confirm restore</button>
+            <button className="secondary-button" type="button" onClick={() => setModeRestoring(false)}>Cancel restore</button>
+          </div>}
+
+          <section className="panel mode-customize-panel">
+            <div className="mode-panel-heading"><div><p className="eyebrow">DEVICE-SPECIFIC CUSTOMIZATION</p><h3>Adjust a suggested preset</h3><p className="section-subtitle">Saved overrides are specific to an existing device and property. The backend validates capability and value ranges.</p></div></div>
+            <form className="mode-customize-form" onSubmit={saveModePresetOverrides}>
+              <label>Preset type<select value={modePresetType} onChange={(event) => { setModePresetType(event.target.value); setModePresetId(""); setModeRuleValue(""); }}><option value="season">Season</option><option value="mood">Mood</option></select></label>
+              <label>Preset<select value={modePresetId} onChange={(event) => { setModePresetId(event.target.value); setModePreview(null); }} required><option value="">Select a preset</option>{modePresetOptions.map((preset) => <option value={preset.id} key={preset.id}>{preset.label}</option>)}</select></label>
+              <label>Device<select value={modeRuleDeviceId} onChange={(event) => { setModeRuleDeviceId(event.target.value); setModeRuleProperty(""); setModeRuleValue(""); }} required><option value="">Select a device</option>{devices.map((device) => <option value={getDeviceId(device)} key={getDeviceId(device)}>{getDeviceName(device)} · {getRoomName(device)}</option>)}</select></label>
+              <label>Property<select value={modeRuleProperty} onChange={(event) => { setModeRuleProperty(event.target.value); setModeRuleValue(""); }} required disabled={!modeRuleDevice}><option value="">Select supported property</option>{modeRuleProperties.map((property) => <option value={property} key={property}>{property}</option>)}</select></label>
+              {modeRuleProperty === "policy" ? <label>Device policy<select value={modeRuleValue} onChange={(event) => setModeRuleValue(event.target.value)} required><option value="">Choose policy</option><option value="ON">ON — power on and configure</option><option value="OFF">OFF — power off</option><option value="KEEP_CURRENT">KEEP_CURRENT — preserve state and settings</option><option value="CONFIGURE_ONLY">CONFIGURE_ONLY — change settings, preserve power</option></select></label>
+                : modeRuleProperty === "color" ? <label>Value<input type="color" value={modeRuleValue || "#D96B78"} onChange={(event) => setModeRuleValue(event.target.value)} required /></label>
+                  : <label>Value<input type="number" value={modeRuleValue} onChange={(event) => setModeRuleValue(event.target.value)} min={modeRuleProperty === "brightness" ? 0 : modeRuleProperty === "colorTemperature" ? 2700 : modeRuleDevice?.type === "AC" ? 16 : modeRuleDevice?.type === "Heater" ? 20 : 1} max={modeRuleProperty === "brightness" ? 100 : modeRuleProperty === "colorTemperature" ? 6500 : modeRuleDevice?.type === "AC" ? 30 : modeRuleDevice?.type === "Heater" ? 45 : 5} step={modeRuleProperty === "colorTemperature" ? 100 : 1} required disabled={!modeRuleProperty} /></label>}
+              <button className="secondary-button" type="submit" disabled={modePresetBusy || !modePresetId || !modeRuleDeviceId || !modeRuleProperty}>{modePresetBusy ? "Saving…" : "Save device override"}</button>
+            </form>
+            {activeModePreset?.overrides?.length > 0 && <div className="mode-override-list">
+              <h4>Saved overrides for {activeModePreset.label}</h4>
+              {activeModePreset.overrides.map((rule) => {
+                const device = devices.find((item) => getDeviceId(item) === rule.deviceId);
+                return <div className="mode-override-row" key={`${rule.deviceId}-${rule.property}`}>
+                  <span>{device ? getDeviceName(device) : rule.deviceId} · {rule.property} = {typeof rule.value === "boolean" ? (rule.value ? "ON" : "OFF") : rule.value}</span>
+                  <button className="text-button" type="button" disabled={modePresetBusy} onClick={() => removeModePresetOverride(modePresetType, modePresetId, rule.deviceId, rule.property)}>Remove</button>
+                </div>;
+              })}
+            </div>}
+          </section>
+
+          <section className="panel mode-history-panel">
+            <div className="mode-panel-heading"><div><p className="eyebrow">PERSISTED AUDIT TRAIL</p><h3>Mode application history</h3></div></div>
+            {modeHistory.length === 0 ? <p className="fine-print">No confirmed mode applications have been recorded.</p> : <div className="mode-history-list">
+              {modeHistory.map((entry) => {
+                const roomsAffected = [...new Set(entry.actions.map((action) => action.roomName).filter(Boolean))];
+                const devicesAffected = [...new Set(entry.actions.map((action) => action.deviceName || action.deviceId).filter(Boolean))];
+                const roomsInSelection = entry.selection?.roomNames ?? [];
+                const devicesInSelection = entry.selection?.deviceIds ?? [];
+                const season = seasonPresets.find((item) => item.id === entry.seasonId)?.label;
+                const mood = moodPresets.find((item) => item.id === entry.moodId)?.label;
+                return <article className="mode-history-entry" key={entry.id}>
+                  <div className="mode-history-heading"><strong>{[season, mood].filter(Boolean).join(" + ") || "Mode application"}</strong><span className={`mode-outcome mode-outcome-${entry.outcome}`}>{entry.outcome}</span></div>
+                  <p>{roomsAffected.length ? roomsAffected.join(", ") : roomsInSelection.length ? roomsInSelection.join(", ") : "All rooms"} · {devicesAffected.length ? devicesAffected.join(", ") : devicesInSelection.length ? devicesInSelection.join(", ") : "No compatible devices"}</p>
+                  <small>{formatDate(entry.appliedAt)} · {entry.actions.filter((action) => action.status === "applied").length} applied · {entry.actions.filter((action) => action.status === "skipped").length} skipped · {entry.actions.filter((action) => action.status === "failed").length} failed</small>
+                  {entry.restoredAt > 0 && <small className="mode-restored-label">Restored {formatDate(entry.restoredAt)}</small>}
+                  {entry.actions.some((action) => action.status === "failed" || action.status === "skipped") && <details><summary>View per-device results</summary>{entry.actions.filter((action) => action.status === "failed" || action.status === "skipped").map((action, index) => <p key={`${action.deviceId}-${action.property}-${index}`}>{action.deviceName || action.deviceId} · {action.property}: {action.status} — {action.reason}</p>)}</details>}
+                  {entry.restoreActions?.length > 0 && entry.restoredAt === 0 && <details><summary>View restore results</summary>{entry.restoreActions.map((action, index) => <p key={`${action.deviceId}-${action.property}-${index}`}>{action.deviceId} · {action.property}: {action.status}{action.reason ? ` — ${action.reason}` : ""}</p>)}</details>}
+                </article>;
+              })}
+            </div>}
+          </section>
         </section>}
 
         {activeSection === "energy" && <section id="energy" className="content-section">

@@ -59,6 +59,832 @@ namespace
         std::atomic<unsigned long long> nextId{1};
     };
 
+    struct ModePreviewRecord
+    {
+        json selection;
+        json actions;
+        long long expiresAt = 0;
+    };
+
+    struct ModePreviewRegistry
+    {
+        std::mutex mutex;
+        std::unordered_map<std::string, ModePreviewRecord> previews;
+        std::atomic<unsigned long long> nextId{1};
+    };
+
+    struct ModePresetInfo
+    {
+        const char *id;
+        const char *label;
+        const char *description;
+    };
+
+    const std::vector<ModePresetInfo> &seasonPresetInfo()
+    {
+        static const std::vector<ModePresetInfo> presets = {
+            {"summer", "Summer", "Suggested cooling and airflow policy: compatible ACs and fans ON, heaters OFF, lights unchanged."},
+            {"monsoon", "Monsoon", "Suggested airflow policy: fans ON; ACs, heaters, and lights unchanged. No weather is measured."},
+            {"winter", "Winter", "Suggested heating policy: heaters ON, ACs OFF, fans configured without changing power, lights unchanged."},
+            {"spring", "Spring", "Suggested mild policy: ACs and heaters OFF, fans configured without changing power, lights unchanged."}};
+        return presets;
+    }
+
+    const std::vector<ModePresetInfo> &moodPresetInfo()
+    {
+        static const std::vector<ModePresetInfo> presets = {
+            {"focus", "Focus / Study", "Suggested study lights and fan ON, with supported lighting and fan settings."},
+            {"relax", "Relax", "Suggested lights and bedroom/living fans ON with softer supported settings."},
+            {"romantic", "Romantic", "Suggested ambient-capable lights ON with warm or colored settings where supported."},
+            {"movie-night", "Movie Night", "Suggested dimmable lights ON at low brightness; other lights and devices stay unchanged."},
+            {"sleep", "Sleep", "Suggested bedroom lights OFF and fan ON at a low setting; other devices stay unchanged."},
+            {"energize", "Energize", "Suggested study/living lights and fans ON with supported settings."}};
+        return presets;
+    }
+
+    const ModePresetInfo *findPresetInfo(
+        const std::string &modeType, const std::string &presetId)
+    {
+        const auto &presets =
+            modeType == "season" ? seasonPresetInfo() : moodPresetInfo();
+        const auto found = std::find_if(
+            presets.begin(), presets.end(),
+            [&presetId](const ModePresetInfo &preset)
+            { return preset.id == presetId; });
+        return found == presets.end() ? nullptr : &*found;
+    }
+
+    std::string modeRoomCategory(const std::string &roomName)
+    {
+        std::string lower = roomName;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char value)
+                       { return static_cast<char>(std::tolower(value)); });
+        if (lower.find("bed") != std::string::npos)
+            return "bedroom";
+        if (lower.find("study") != std::string::npos ||
+            lower.find("office") != std::string::npos)
+            return "study";
+        if (lower.find("living") != std::string::npos ||
+            lower.find("lounge") != std::string::npos)
+            return "living";
+        if (lower.find("kitchen") != std::string::npos)
+            return "kitchen";
+        return "other";
+    }
+
+    using ModeRule = std::pair<std::string, json>;
+
+    std::string defaultModePolicy(
+        const std::string &modeType,
+        const std::string &presetId,
+        const DeviceRecord &device)
+    {
+        const std::string category = modeRoomCategory(device.roomName);
+        if (modeType == "season")
+        {
+            if (device.type == "AC")
+            {
+                if (presetId == "summer")
+                    return "ON";
+                if (presetId == "monsoon")
+                    return "CONFIGURE_ONLY";
+                if (presetId == "winter" || presetId == "spring")
+                    return "OFF";
+                return "KEEP_CURRENT";
+            }
+            if (device.type == "Fan")
+            {
+                if (presetId == "summer" || presetId == "monsoon")
+                    return "ON";
+                if (presetId == "winter" || presetId == "spring")
+                    return "CONFIGURE_ONLY";
+                return "KEEP_CURRENT";
+            }
+            if (device.type == "Heater")
+            {
+                if (presetId == "winter")
+                    return "ON";
+                if (presetId == "summer" || presetId == "spring")
+                    return "OFF";
+                return "KEEP_CURRENT";
+            }
+            if (device.type == "Light")
+                return "KEEP_CURRENT";
+            return "KEEP_CURRENT";
+        }
+
+        if (device.type == "Light")
+        {
+            if (presetId == "focus" && category == "study")
+                return "ON";
+            if (presetId == "relax" || presetId == "romantic")
+                return presetId != "romantic" ||
+                               device.supportsBrightness ||
+                               device.supportsColor ||
+                               device.supportsColorTemperature
+                    ? "ON"
+                    : "KEEP_CURRENT";
+            if (presetId == "movie-night")
+                return device.supportsBrightness ? "ON" : "KEEP_CURRENT";
+            if (presetId == "sleep" && category == "bedroom")
+                return "OFF";
+            if (presetId == "energize" &&
+                (category == "study" || category == "living"))
+                return "ON";
+        }
+        if (device.type == "Fan")
+        {
+            if ((presetId == "focus" && category == "study") ||
+                (presetId == "sleep" && category == "bedroom") ||
+                (presetId == "relax" &&
+                 (category == "bedroom" || category == "living")) ||
+                (presetId == "energize" &&
+                 (category == "study" || category == "living")))
+                return "ON";
+        }
+        return "";
+    }
+
+    std::vector<ModeRule> defaultModeRules(
+        const std::string &modeType,
+        const std::string &presetId,
+        const DeviceRecord &device)
+    {
+        std::vector<ModeRule> rules;
+        const std::string category = modeRoomCategory(device.roomName);
+        if (modeType == "season")
+        {
+            if (device.type == "AC")
+            {
+                const int temperature =
+                    presetId == "summer" ? 24 :
+                    presetId == "monsoon" ? 25 :
+                    presetId == "winter" ? 26 : 24;
+                rules.emplace_back("setting", temperature);
+            }
+            else if (device.type == "Fan")
+            {
+                int speed = 0;
+                if (presetId == "summer")
+                    speed = category == "living" ? 3 : 2;
+                else if (presetId == "monsoon")
+                    speed = category == "living" ? 2 : 1;
+                else if (presetId == "winter")
+                    speed = category == "bedroom" ? 1 : 2;
+                else
+                    speed = category == "bedroom" ? 1 :
+                            category == "living" ? 3 : 2;
+                rules.emplace_back("setting", speed);
+            }
+            else if (device.type == "Heater" && presetId == "winter")
+            {
+                const int temperature =
+                    category == "bedroom" ? 21 :
+                    category == "study" ? 20 : 22;
+                rules.emplace_back("setting", temperature);
+            }
+            return rules;
+        }
+
+        if (device.type == "Light")
+        {
+            if (presetId == "focus" && category == "study")
+            {
+                rules.emplace_back("brightness", 85);
+                rules.emplace_back("colorTemperature", 4500);
+            }
+            else if (presetId == "relax")
+            {
+                rules.emplace_back("brightness", 35);
+                rules.emplace_back("colorTemperature", 3000);
+            }
+            else if (presetId == "romantic")
+            {
+                rules.emplace_back("brightness", 40);
+                rules.emplace_back("color", "#D96B78");
+                rules.emplace_back("colorTemperature", 2700);
+            }
+            else if (presetId == "movie-night")
+            {
+                rules.emplace_back("brightness", 15);
+            }
+            else if (presetId == "sleep" && category == "bedroom")
+            {
+                rules.emplace_back("brightness", 10);
+            }
+            else if (presetId == "energize" &&
+                     (category == "study" || category == "living"))
+            {
+                rules.emplace_back("brightness", 100);
+                rules.emplace_back("colorTemperature", 5000);
+            }
+        }
+        else if (device.type == "Fan")
+        {
+            if ((presetId == "focus" && category == "study") ||
+                (presetId == "sleep" && category == "bedroom"))
+                rules.emplace_back("setting", presetId == "sleep" ? 1 : 2);
+            else if (presetId == "relax" &&
+                     (category == "bedroom" || category == "living"))
+                rules.emplace_back("setting", 1);
+            else if (presetId == "energize" &&
+                     (category == "study" || category == "living"))
+                rules.emplace_back("setting", 3);
+        }
+        return rules;
+    }
+
+    bool modePropertySupported(
+        const DeviceRecord &device,
+        const std::string &property,
+        const json &value,
+        std::string &reason)
+    {
+        if (property == "power")
+        {
+            if (!value.is_boolean())
+            {
+                reason = "Power values must be boolean.";
+                return false;
+            }
+            return true;
+        }
+        if (property == "policy")
+        {
+            if (!value.is_string())
+            {
+                reason = "Device policy must be a string.";
+                return false;
+            }
+            const std::string policy = value.get<std::string>();
+            if (policy == "ON" || policy == "OFF" ||
+                policy == "KEEP_CURRENT" || policy == "CONFIGURE_ONLY")
+                return true;
+            reason = "Device policy must be ON, OFF, KEEP_CURRENT, or CONFIGURE_ONLY.";
+            return false;
+        }
+        if (property == "setting")
+        {
+            if (!value.is_number_integer())
+            {
+                reason = "Device settings must be integer values.";
+                return false;
+            }
+            const int setting = value.get<int>();
+            if (device.type == "AC" && setting >= 16 && setting <= 30)
+                return true;
+            if (device.type == "Fan" && setting >= 1 && setting <= 5)
+                return true;
+            if (device.type == "Heater" && setting >= 20 && setting <= 45)
+                return true;
+            reason = device.type == "AC"
+                ? "AC temperature must be between 16 and 30 °C."
+                : device.type == "Fan"
+                    ? "Fan speed must be between 1 and 5."
+                    : device.type == "Heater"
+                        ? "Heater temperature must be between 20 and 45 °C."
+                        : "This device does not support an adjustable setting.";
+            return false;
+        }
+        if (property == "brightness")
+        {
+            if (!value.is_number_integer() ||
+                value.get<int>() < 0 || value.get<int>() > 100)
+            {
+                reason = "Brightness must be an integer from 0 to 100.";
+                return false;
+            }
+            if (device.type != "Light" || !device.supportsBrightness)
+            {
+                reason = "This light does not support brightness.";
+                return false;
+            }
+            return true;
+        }
+        if (property == "color")
+        {
+            if (!value.is_string())
+            {
+                reason = "Color must be a #RRGGBB hexadecimal string.";
+                return false;
+            }
+            const std::string color = value.get<std::string>();
+            if (color.size() != 7 || color[0] != '#' ||
+                !std::all_of(color.begin() + 1, color.end(),
+                             [](unsigned char character)
+                             { return std::isxdigit(character) != 0; }))
+            {
+                reason = "Color must be a #RRGGBB hexadecimal string.";
+                return false;
+            }
+            if (device.type != "Light" || !device.supportsColor)
+            {
+                reason = "This light does not support RGB color.";
+                return false;
+            }
+            return true;
+        }
+        if (property == "colorTemperature")
+        {
+            if (!value.is_number_integer() ||
+                value.get<int>() < 2700 || value.get<int>() > 6500)
+            {
+                reason = "Color temperature must be an integer from 2700 to 6500 K.";
+                return false;
+            }
+            if (device.type != "Light" || !device.supportsColorTemperature)
+            {
+                reason = "This light does not support adjustable color temperature.";
+                return false;
+            }
+            return true;
+        }
+        reason = "Unsupported mode setting property.";
+        return false;
+    }
+
+    json currentModeValue(const DeviceRecord &device, const std::string &property)
+    {
+        if (property == "power")
+            return device.status == 1;
+        if (property == "setting")
+            return device.setting;
+        if (property == "brightness")
+            return device.brightness;
+        if (property == "color")
+            return device.color;
+        if (property == "colorTemperature")
+            return device.colorTemperature;
+        return nullptr;
+    }
+
+    void applyModeValue(
+        SmartHome &home,
+        const std::string &deviceId,
+        const std::string &property,
+        const json &value)
+    {
+        if (property == "power")
+        {
+            if (value.get<bool>())
+                home.turnOn(deviceId);
+            else
+                home.turnOff(deviceId);
+        }
+        else if (property == "setting")
+        {
+            if (!home.setDeviceSetting(deviceId, value.get<int>()))
+                throw std::runtime_error("Could not persist the device setting.");
+        }
+        else if (property == "brightness")
+        {
+            if (!home.setLightBrightness(deviceId, value.get<int>()))
+                throw std::runtime_error("Could not persist light brightness.");
+        }
+        else if (property == "color")
+        {
+            if (!home.setLightColor(deviceId, value.get<std::string>()))
+                throw std::runtime_error("Could not persist light color.");
+        }
+        else if (property == "colorTemperature")
+        {
+            if (!home.setLightColorTemperature(deviceId, value.get<int>()))
+                throw std::runtime_error("Could not persist light color temperature.");
+        }
+        else
+        {
+            throw std::invalid_argument("Unsupported mode setting property.");
+        }
+    }
+
+    json serializeModeHistory(const ModeHistoryRecord &history)
+    {
+        json details = json::array();
+        json selection = json::object();
+        json restoreDetails = json::array();
+        try
+        {
+            details = json::parse(history.detailsJson);
+            restoreDetails = json::parse(history.restoreDetailsJson);
+            if (details.is_object() && details.contains("actions"))
+            {
+                selection = details.value("selection", json::object());
+                details = details["actions"];
+            }
+        }
+        catch (const json::exception &)
+        {
+            throw std::runtime_error("Stored mode history contains invalid JSON.");
+        }
+        return {
+            {"id", history.id},
+            {"seasonId", history.seasonId},
+            {"moodId", history.moodId},
+            {"appliedAt", history.appliedAt},
+            {"outcome", history.outcome},
+            {"selection", selection},
+            {"actions", details},
+            {"restoredAt", history.restoredAt},
+            {"restoreOutcome", history.restoredAt > 0 ? "restored" : ""},
+            {"restoreActions", restoreDetails},
+            {"canRestore", history.restoredAt == 0 &&
+                               !history.snapshotJson.empty() &&
+                               history.snapshotJson != "[]"}};
+    }
+
+    json buildModeActions(
+        SmartHome &home,
+        const json &selection,
+        const std::vector<DeviceRecord> &devices)
+    {
+        const std::string seasonId = selection.value("seasonId", "");
+        const std::string moodId = selection.value("moodId", "");
+        std::set<std::string> roomNames;
+        std::set<std::string> deviceIds;
+        if (selection.contains("roomNames"))
+            for (const auto &room : selection["roomNames"])
+                roomNames.insert(room.get<std::string>());
+        if (selection.contains("deviceIds"))
+            for (const auto &device : selection["deviceIds"])
+                deviceIds.insert(device.get<std::string>());
+
+        auto inTarget = [&](const DeviceRecord &device)
+        {
+            return (roomNames.empty() || roomNames.count(device.roomName) > 0) &&
+                   (deviceIds.empty() || deviceIds.count(device.id) > 0);
+        };
+
+        std::map<std::pair<std::string, std::string>, json> proposals;
+        auto addProposal = [&](const DeviceRecord &device,
+                               const std::string &property,
+                               const json &value,
+                               const std::string &source,
+                               const std::string &reason)
+        {
+            const auto key = std::make_pair(device.id, property);
+            const bool hasPrevious = proposals.find(key) != proposals.end();
+            std::string finalReason = reason;
+            if (hasPrevious && source == "mood")
+                finalReason = "Mood overlay overrides the seasonal baseline for this device property.";
+            else if (source == "custom")
+                finalReason = "User-customized preset value.";
+            proposals[key] = {
+                {"deviceId", device.id},
+                {"deviceName", device.name},
+                {"deviceType", device.type},
+                {"roomName", device.roomName},
+                {"property", property},
+                {"previousValue", currentModeValue(device, property)},
+                {"value", value},
+                {"source", source},
+                {"reason", finalReason}};
+        };
+
+        std::map<std::string, std::string> policies;
+        std::map<std::string, std::string> policySources;
+        auto applyDefaultPolicies = [&](const std::string &modeType,
+                                        const std::string &presetId,
+                                        const std::string &source)
+        {
+            if (presetId.empty())
+                return;
+            for (const DeviceRecord &device : devices)
+            {
+                if (!inTarget(device))
+                    continue;
+                const std::string policy =
+                    defaultModePolicy(modeType, presetId, device);
+                if (!policy.empty())
+                {
+                    policies[device.id] = policy;
+                    policySources[device.id] = source;
+                }
+            }
+        };
+        applyDefaultPolicies("season", seasonId, "season");
+        applyDefaultPolicies("mood", moodId, "mood");
+
+        auto loadPolicyOverrides = [&](const std::string &modeType,
+                                       const std::string &presetId)
+        {
+            if (presetId.empty())
+                return;
+            const auto stored = home.getModePresets(modeType);
+            const auto preset = std::find_if(
+                stored.begin(), stored.end(),
+                [&presetId](const ModePresetRecord &item)
+                { return item.presetId == presetId; });
+            if (preset == stored.end())
+                return;
+            const json overrides = json::parse(preset->overridesJson);
+            for (const json &rule : overrides)
+            {
+                const std::string property = rule.value("property", "");
+                if (property != "policy" && property != "power")
+                    continue;
+                const std::string id = rule.value("deviceId", "");
+                const auto device = std::find_if(
+                    devices.begin(), devices.end(),
+                    [&id](const DeviceRecord &item)
+                    { return item.id == id; });
+                if (device == devices.end() || !inTarget(*device))
+                    continue;
+                const json value = rule.value("value", json(nullptr));
+                policies[id] = property == "power"
+                    ? (value.get<bool>() ? "ON" : "OFF")
+                    : value.get<std::string>();
+                policySources[id] = "custom";
+            }
+        };
+        loadPolicyOverrides("season", seasonId);
+        loadPolicyOverrides("mood", moodId);
+
+        auto applyPresetRules = [&](const std::string &modeType,
+                                    const std::string &presetId,
+                                    const std::string &source)
+        {
+            if (presetId.empty())
+                return;
+            for (const DeviceRecord &device : devices)
+            {
+                if (!inTarget(device))
+                    continue;
+                const auto devicePolicy = policies.find(device.id);
+                if (devicePolicy != policies.end() &&
+                    (devicePolicy->second == "OFF" ||
+                     devicePolicy->second == "KEEP_CURRENT"))
+                    continue;
+                for (const auto &rule : defaultModeRules(
+                         modeType, presetId, device))
+                {
+                    addProposal(
+                        device, rule.first, rule.second, source,
+                        source == "mood"
+                            ? "Suggested mood overlay on this compatible device."
+                            : "Suggested seasonal baseline for this room and device type.");
+                }
+            }
+
+            const auto stored = home.getModePresets(modeType);
+            const auto preset = std::find_if(
+                stored.begin(), stored.end(),
+                [&presetId](const ModePresetRecord &item)
+                { return item.presetId == presetId; });
+            if (preset == stored.end())
+                return;
+            const json overrides = json::parse(preset->overridesJson);
+            for (const json &overrideRule : overrides)
+            {
+                const std::string id = overrideRule.value("deviceId", "");
+                const std::string property = overrideRule.value("property", "");
+                if (property == "policy")
+                {
+                    const bool exists = std::any_of(
+                        devices.begin(), devices.end(),
+                        [&id](const DeviceRecord &item)
+                        { return item.id == id; });
+                    if (!exists)
+                    {
+                        const std::string ruleRoom =
+                            overrideRule.value("roomName", "");
+                        const bool selectedMissingDevice =
+                            (roomNames.empty() && deviceIds.empty()) ||
+                            (deviceIds.count(id) > 0) ||
+                            (!ruleRoom.empty() && roomNames.count(ruleRoom) > 0);
+                        if (selectedMissingDevice)
+                        {
+                            proposals[{id, property}] = {
+                                {"deviceId", id},
+                                {"deviceName", ""},
+                                {"roomName", ruleRoom},
+                                {"property", property},
+                                {"previousValue", nullptr},
+                                {"value", overrideRule.value("value", json(nullptr))},
+                                {"source", "custom"},
+                                {"status", "skipped"},
+                                {"reason", "The customized preset device no longer exists."}};
+                        }
+                    }
+                    continue;
+                }
+                const auto device = std::find_if(
+                    devices.begin(), devices.end(),
+                    [&id](const DeviceRecord &item)
+                    { return item.id == id; });
+                if (device == devices.end())
+                {
+                    const std::string ruleRoom =
+                        overrideRule.value("roomName", "");
+                    const bool selectedMissingDevice =
+                        (roomNames.empty() && deviceIds.empty()) ||
+                        (deviceIds.count(id) > 0) ||
+                        (!ruleRoom.empty() && roomNames.count(ruleRoom) > 0);
+                    if (!selectedMissingDevice)
+                        continue;
+                    proposals[{id, property}] = {
+                        {"deviceId", id},
+                        {"deviceName", ""},
+                        {"roomName", ruleRoom},
+                        {"property", property},
+                        {"previousValue", nullptr},
+                        {"value", overrideRule.value("value", json(nullptr))},
+                        {"source", "custom"},
+                        {"status", "skipped"},
+                        {"reason", "The customized preset device no longer exists."}};
+                    continue;
+                }
+                if (!inTarget(*device))
+                    continue;
+                addProposal(
+                    *device, property,
+                    overrideRule.value("value", json(nullptr)),
+                    "custom", "User-customized preset value.");
+            }
+        };
+
+        applyPresetRules("season", seasonId, "season");
+        applyPresetRules("mood", moodId, "mood");
+
+        json actions = json::array();
+        std::set<std::string> devicesWithActions;
+        for (auto &entry : proposals)
+        {
+            json action = entry.second;
+            const std::string deviceId =
+                action["deviceId"].get<std::string>();
+            std::string policy = policies.count(deviceId)
+                ? policies.at(deviceId)
+                : "KEEP_CURRENT";
+            const auto policySource = policySources.find(deviceId);
+            action["policy"] = policy;
+            if (!action.contains("status"))
+            {
+                const auto device = std::find_if(
+                    devices.begin(), devices.end(),
+                    [&deviceId](const DeviceRecord &item)
+                    { return item.id == deviceId; });
+                const std::string property =
+                    action["property"].get<std::string>();
+                std::string reason;
+                if (device == devices.end() ||
+                    !modePropertySupported(
+                        *device, property,
+                        action["value"], reason))
+                {
+                    action["status"] = "skipped";
+                    action["reason"] = device == devices.end()
+                        ? "The selected device no longer exists."
+                        : reason;
+                }
+                else if (property != "power" &&
+                         (policy == "KEEP_CURRENT" || policy == "OFF"))
+                {
+                    action["status"] = "skipped";
+                    action["reason"] = policy == "OFF"
+                        ? "The OFF policy does not apply additional settings."
+                        : "The KEEP_CURRENT policy leaves power and settings unchanged.";
+                }
+                else if (action["previousValue"] == action["value"])
+                {
+                    action["status"] = "unchanged";
+                    action["reason"] = "The device already has the proposed value.";
+                }
+                else
+                {
+                    action["status"] = "ready";
+                }
+            }
+            devicesWithActions.insert(deviceId);
+            actions.push_back(std::move(action));
+        }
+
+        for (const DeviceRecord &device : devices)
+        {
+            if (!inTarget(device))
+                continue;
+            const std::string policy = policies.count(device.id)
+                ? policies.at(device.id)
+                : "KEEP_CURRENT";
+            if (policy == "ON" || policy == "OFF")
+            {
+                const auto key = std::make_pair(device.id, "power");
+                if (!proposals.count(key))
+                {
+                    json action = {
+                        {"deviceId", device.id},
+                        {"deviceName", device.name},
+                        {"deviceType", device.type},
+                        {"roomName", device.roomName},
+                        {"property", "power"},
+                        {"previousValue", device.status == 1},
+                        {"value", policy == "ON"},
+                        {"policy", policy},
+                        {"source", policySources.count(device.id)
+                                       ? policySources.at(device.id)
+                                       : "default"},
+                        {"reason", "Explicit device power policy."}};
+                    action["status"] = device.status == (policy == "ON" ? 1 : 0)
+                        ? "unchanged"
+                        : "ready";
+                    actions.push_back(std::move(action));
+                    devicesWithActions.insert(device.id);
+                }
+            }
+            if (!devicesWithActions.count(device.id))
+            {
+                actions.push_back({
+                    {"deviceId", device.id},
+                    {"deviceName", device.name},
+                    {"deviceType", device.type},
+                    {"roomName", device.roomName},
+                    {"property", "policy"},
+                    {"previousValue", device.status == 1 ? "ON" : "OFF"},
+                    {"value", policy},
+                    {"policy", policy},
+                    {"source", policySources.count(device.id)
+                                   ? policySources.at(device.id)
+                                   : "default"},
+                    {"status", "unchanged"},
+                    {"reason", policy == "KEEP_CURRENT"
+                                   ? "This device is intentionally left unchanged."
+                                   : "This policy requires no further setting changes."}});
+            }
+        }
+        return actions;
+    }
+
+    json buildModeSnapshot(
+        const json &selection,
+        const std::vector<DeviceRecord> &devices)
+    {
+        std::set<std::string> roomNames;
+        std::set<std::string> deviceIds;
+        for (const json &room : selection.value("roomNames", json::array()))
+            roomNames.insert(room.get<std::string>());
+        for (const json &id : selection.value("deviceIds", json::array()))
+            deviceIds.insert(id.get<std::string>());
+
+        json snapshot = json::array();
+        for (const DeviceRecord &device : devices)
+        {
+            if ((!roomNames.empty() &&
+                 roomNames.count(device.roomName) == 0) ||
+                (!deviceIds.empty() && deviceIds.count(device.id) == 0))
+                continue;
+
+            std::vector<std::string> properties = {"power"};
+            if (device.type == "AC" || device.type == "Fan" ||
+                device.type == "Heater")
+                properties.push_back("setting");
+            if (device.type == "Light")
+            {
+                if (device.supportsBrightness)
+                    properties.push_back("brightness");
+                if (device.supportsColor)
+                    properties.push_back("color");
+                if (device.supportsColorTemperature)
+                    properties.push_back("colorTemperature");
+            }
+            for (const std::string &property : properties)
+            {
+                snapshot.push_back({
+                    {"deviceId", device.id},
+                    {"deviceName", device.name},
+                    {"roomName", device.roomName},
+                    {"property", property},
+                    {"value", currentModeValue(device, property)}});
+            }
+        }
+        return snapshot;
+    }
+
+    json serializeModePresetList(
+        const SmartHome &home,
+        const std::string &modeType)
+    {
+        const auto &presets =
+            modeType == "season" ? seasonPresetInfo() : moodPresetInfo();
+        const auto stored = home.getModePresets(modeType);
+        json result = json::array();
+        for (const ModePresetInfo &preset : presets)
+        {
+            json overrides = json::array();
+            const auto found = std::find_if(
+                stored.begin(), stored.end(),
+                [&preset](const ModePresetRecord &item)
+                { return item.presetId == preset.id; });
+            if (found != stored.end())
+                overrides = json::parse(found->overridesJson);
+            result.push_back({
+                {"id", preset.id},
+                {"label", preset.label},
+                {"description", preset.description},
+                {"overrides", overrides}});
+        }
+        return result;
+    }
+
     std::string environmentValue(const char *name)
     {
         const char *value = std::getenv(name);
@@ -586,6 +1412,7 @@ int main()
 
         httplib::Server server;
         RoomAutomationRegistry automationRegistry;
+        ModePreviewRegistry modePreviewRegistry;
 
         server.set_default_headers({
             {"Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"},
@@ -3028,6 +3855,830 @@ int main()
                         json({{"error", error.what()}}).dump(),
                         "application/json");
                 }
+            });
+
+        server.Get(
+            "/api/modes/seasons",
+            [&home](const httplib::Request &, httplib::Response &res)
+            {
+                res.set_content(
+                    serializeModePresetList(home, "season").dump(),
+                    "application/json");
+            });
+
+        server.Get(
+            "/api/modes/moods",
+            [&home](const httplib::Request &, httplib::Response &res)
+            {
+                res.set_content(
+                    serializeModePresetList(home, "mood").dump(),
+                    "application/json");
+            });
+
+        server.Put(
+            R"(/api/modes/presets/(season|mood)/([^/]+))",
+            [&home](const httplib::Request &req, httplib::Response &res)
+            {
+                auto fail = [&res](int status, const std::string &message)
+                {
+                    res.status = status;
+                    res.set_content(
+                        json({{"error", message}}).dump(),
+                        "application/json");
+                };
+                try
+                {
+                    const std::string modeType = req.matches[1].str();
+                    const std::string presetId = req.matches[2].str();
+                    const ModePresetInfo *preset =
+                        findPresetInfo(modeType, presetId);
+                    if (preset == nullptr)
+                    {
+                        fail(404, "Built-in mode preset not found.");
+                        return;
+                    }
+                    const json body = json::parse(req.body);
+                    if (!body.is_object() || body.size() != 1 ||
+                        !body.contains("overrides") ||
+                        !body["overrides"].is_array() ||
+                        body["overrides"].size() > 100)
+                    {
+                        fail(400, "Provide an overrides array with at most 100 device rules.");
+                        return;
+                    }
+
+                    const auto devices = home.getAllDeviceRecords();
+                    std::set<std::pair<std::string, std::string>> seen;
+                    std::set<std::string> devicesWithPolicy;
+                    json canonicalOverrides = json::array();
+                    for (const json &rule : body["overrides"])
+                    {
+                        if (!rule.is_object() ||
+                            (rule.size() != 3 && rule.size() != 4) ||
+                            !rule.contains("deviceId") ||
+                            !rule["deviceId"].is_string() ||
+                            !rule.contains("property") ||
+                            !rule["property"].is_string() ||
+                            !rule.contains("value"))
+                        {
+                            fail(400, "Each override requires deviceId, property, and value.");
+                            return;
+                        }
+                        const std::string deviceId =
+                            rule["deviceId"].get<std::string>();
+                        const std::string property =
+                            rule["property"].get<std::string>();
+                        const auto device = std::find_if(
+                            devices.begin(), devices.end(),
+                            [&deviceId](const DeviceRecord &item)
+                            { return item.id == deviceId; });
+                        if (device == devices.end())
+                        {
+                            fail(404, "Override references a device that does not exist.");
+                            return;
+                        }
+                        if (rule.contains("roomName") &&
+                            (!rule["roomName"].is_string() ||
+                             rule["roomName"].get<std::string>() != device->roomName))
+                        {
+                            fail(400, "Override roomName must match the selected device's current room.");
+                            return;
+                        }
+                        if (!seen.emplace(deviceId, property).second)
+                        {
+                            fail(400, "A preset can define only one override per device property.");
+                            return;
+                        }
+                        if (property == "policy" || property == "power")
+                        {
+                            if (!devicesWithPolicy.insert(deviceId).second)
+                            {
+                                fail(400, "A device may have only one power-policy override per preset.");
+                                return;
+                            }
+                        }
+                        std::string reason;
+                        if (!modePropertySupported(
+                                *device, property, rule["value"], reason))
+                        {
+                            fail(400, reason);
+                            return;
+                        }
+                        canonicalOverrides.push_back({
+                            {"deviceId", deviceId},
+                            {"roomName", device->roomName},
+                            {"property", property},
+                            {"value", rule["value"]}});
+                    }
+
+                    const ModePresetRecord stored{
+                        modeType,
+                        presetId,
+                        canonicalOverrides.dump(),
+                        static_cast<long long>(std::time(nullptr))};
+                    if (!home.saveModePreset(stored))
+                    {
+                        fail(500, "Could not persist the customized preset.");
+                        return;
+                    }
+                    res.set_content(
+                        json({
+                            {"id", presetId},
+                            {"modeType", modeType},
+                            {"overrides", canonicalOverrides},
+                            {"updatedAt", stored.updatedAt}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::parse_error &)
+                {
+                    fail(400, "Request body must be valid JSON.");
+                }
+                catch (const json::exception &error)
+                {
+                    fail(400, error.what());
+                }
+            });
+
+        auto validateModeSelection =
+            [&home](json &selection, std::string &error) -> bool
+        {
+            if (!selection.is_object())
+            {
+                error = "Request body must be a JSON object.";
+                return false;
+            }
+            if (!selection.contains("seasonId") ||
+                !selection["seasonId"].is_string() ||
+                !selection.contains("moodId") ||
+                !selection["moodId"].is_string())
+            {
+                error = "seasonId and moodId must be strings; use an empty string when not selected.";
+                return false;
+            }
+            const std::string seasonId =
+                selection["seasonId"].get<std::string>();
+            const std::string moodId =
+                selection["moodId"].get<std::string>();
+            if (seasonId.empty() && moodId.empty())
+            {
+                error = "Select at least one season or mood preset.";
+                return false;
+            }
+            if ((!seasonId.empty() &&
+                 findPresetInfo("season", seasonId) == nullptr) ||
+                (!moodId.empty() &&
+                 findPresetInfo("mood", moodId) == nullptr))
+            {
+                error = "Unknown season or mood preset.";
+                return false;
+            }
+            for (const std::string &key : {"roomNames", "deviceIds"})
+            {
+                if (!selection.contains(key))
+                    selection[key] = json::array();
+                if (!selection[key].is_array() || selection[key].size() > 500)
+                {
+                    error = key + " must be an array with at most 500 entries.";
+                    return false;
+                }
+                std::set<std::string> unique;
+                for (const json &item : selection[key])
+                {
+                    if (!item.is_string() || item.get<std::string>().empty())
+                    {
+                        error = key + " must contain non-empty strings.";
+                        return false;
+                    }
+                    unique.insert(item.get<std::string>());
+                }
+                selection[key] = json::array();
+                for (const std::string &item : unique)
+                    selection[key].push_back(item);
+            }
+
+            const auto rooms = home.getRoomNames();
+            for (const json &room : selection["roomNames"])
+            {
+                const std::string roomName = room.get<std::string>();
+                if (std::find(rooms.begin(), rooms.end(), roomName) == rooms.end())
+                {
+                    error = "Selected room does not exist: " + roomName;
+                    return false;
+                }
+            }
+            const auto devices = home.getAllDeviceRecords();
+            for (const json &id : selection["deviceIds"])
+            {
+                const std::string deviceId = id.get<std::string>();
+                const auto device = std::find_if(
+                    devices.begin(), devices.end(),
+                    [&deviceId](const DeviceRecord &item)
+                    { return item.id == deviceId; });
+                if (device == devices.end())
+                {
+                    error = "Selected device does not exist: " + deviceId;
+                    return false;
+                }
+                if (!selection["roomNames"].empty() &&
+                    std::find(
+                        selection["roomNames"].begin(),
+                        selection["roomNames"].end(),
+                        device->roomName) == selection["roomNames"].end())
+                {
+                    error = "Selected device is not in one of the selected rooms.";
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        server.Post(
+            "/api/modes/preview",
+            [&home, &modePreviewRegistry, &validateModeSelection](
+                const httplib::Request &req, httplib::Response &res)
+            {
+                try
+                {
+                    json selection = json::parse(req.body);
+                    std::string error;
+                    if (!validateModeSelection(selection, error))
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            json({{"error", error}}).dump(),
+                            "application/json");
+                        return;
+                    }
+                    const json actions = buildModeActions(
+                        home, selection, home.getAllDeviceRecords());
+                    const long long now =
+                        static_cast<long long>(std::time(nullptr));
+                    std::string previewId;
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            modePreviewRegistry.mutex);
+                        for (auto iterator =
+                                 modePreviewRegistry.previews.begin();
+                             iterator != modePreviewRegistry.previews.end();)
+                        {
+                            if (iterator->second.expiresAt < now)
+                                iterator = modePreviewRegistry.previews.erase(iterator);
+                            else
+                                ++iterator;
+                        }
+                        previewId =
+                            "mode-preview-" +
+                            std::to_string(modePreviewRegistry.nextId++);
+                        modePreviewRegistry.previews.emplace(
+                            previewId,
+                            ModePreviewRecord{selection, actions, now + 300});
+                    }
+                    int ready = 0;
+                    int skipped = 0;
+                    int unchanged = 0;
+                    for (const json &action : actions)
+                    {
+                        const std::string status =
+                            action.value("status", "");
+                        ready += status == "ready" ? 1 : 0;
+                        skipped += status == "skipped" ? 1 : 0;
+                        unchanged += status == "unchanged" ? 1 : 0;
+                    }
+                    const std::string seasonId =
+                        selection["seasonId"].get<std::string>();
+                    const std::string moodId =
+                        selection["moodId"].get<std::string>();
+                    const ModePresetInfo *season =
+                        seasonId.empty() ? nullptr :
+                            findPresetInfo("season", seasonId);
+                    const ModePresetInfo *mood =
+                        moodId.empty() ? nullptr :
+                            findPresetInfo("mood", moodId);
+                    res.set_content(
+                        json({
+                            {"previewId", previewId},
+                            {"seasonId", seasonId},
+                            {"seasonLabel", season == nullptr ? "" : season->label},
+                            {"moodId", moodId},
+                            {"moodLabel", mood == nullptr ? "" : mood->label},
+                            {"roomNames", selection["roomNames"]},
+                            {"deviceIds", selection["deviceIds"]},
+                            {"actions", actions},
+                            {"summary", {
+                                {"proposed", ready},
+                                {"skipped", skipped},
+                                {"unchanged", unchanged},
+                                {"message", actions.empty()
+                                    ? "No compatible settings apply to the selected target."
+                                    : ""}}},
+                            {"expiresInSeconds", 300}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::parse_error &)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"Request body must be valid JSON."})",
+                        "application/json");
+                }
+                catch (const json::exception &error)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                }
+            });
+
+        server.Post(
+            "/api/modes/apply",
+            [&home, &modePreviewRegistry, &validateModeSelection](
+                const httplib::Request &req, httplib::Response &res)
+            {
+                try
+                {
+                    const json body = json::parse(req.body);
+                    if (!body.is_object() ||
+                        !body.contains("previewId") ||
+                        !body["previewId"].is_string() ||
+                        !body.contains("confirmed") ||
+                        !body["confirmed"].is_boolean() ||
+                        !body["confirmed"].get<bool>())
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"A previewId and explicit confirmed:true are required."})",
+                            "application/json");
+                        return;
+                    }
+
+                    ModePreviewRecord preview;
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            modePreviewRegistry.mutex);
+                        const std::string previewId =
+                            body["previewId"].get<std::string>();
+                        const auto found =
+                            modePreviewRegistry.previews.find(previewId);
+                        if (found == modePreviewRegistry.previews.end() ||
+                            found->second.expiresAt <
+                                static_cast<long long>(std::time(nullptr)))
+                        {
+                            res.status = 409;
+                            res.set_content(
+                                R"({"error":"Mode preview expired or was already used. Generate a new preview."})",
+                                "application/json");
+                            return;
+                        }
+                        preview = found->second;
+                        modePreviewRegistry.previews.erase(found);
+                    }
+
+                    std::string error;
+                    if (!validateModeSelection(preview.selection, error))
+                    {
+                        res.status = 409;
+                        res.set_content(
+                            json({{"error", "Mode preview is stale: " + error}})
+                                .dump(),
+                            "application/json");
+                        return;
+                    }
+                    const json currentActions = buildModeActions(
+                        home, preview.selection, home.getAllDeviceRecords());
+                    if (currentActions != preview.actions)
+                    {
+                        res.status = 409;
+                        res.set_content(
+                            R"({"error":"Device state or preset values changed after preview. Generate and review a new preview."})",
+                            "application/json");
+                        return;
+                    }
+
+                    json actions = currentActions;
+                    json snapshot = buildModeSnapshot(
+                        preview.selection, home.getAllDeviceRecords());
+                    int applied = 0;
+                    int skipped = 0;
+                    int failed = 0;
+                    for (json &action : actions)
+                    {
+                        if (action.value("status", "") != "ready")
+                        {
+                            skipped += action.value("status", "") == "skipped";
+                            continue;
+                        }
+                        const std::string deviceId =
+                            action["deviceId"].get<std::string>();
+                        const std::string property =
+                            action["property"].get<std::string>();
+                        const std::string roomName =
+                            action["roomName"].get<std::string>();
+                        const auto records = home.getAllDeviceRecords();
+                        const auto device = std::find_if(
+                            records.begin(), records.end(),
+                            [&deviceId](const DeviceRecord &item)
+                            { return item.id == deviceId; });
+                        if (device == records.end() ||
+                            device->roomName != roomName ||
+                            currentModeValue(*device, property) !=
+                                action["previousValue"])
+                        {
+                            action["status"] = "failed";
+                            action["reason"] = "Device state changed after preview; no change was applied.";
+                            ++failed;
+                            continue;
+                        }
+                        try
+                        {
+                            applyModeValue(
+                                home, deviceId, property, action["value"]);
+                            const auto persistedRecords =
+                                home.getAllDeviceRecords();
+                            const auto persistedDevice = std::find_if(
+                                persistedRecords.begin(),
+                                persistedRecords.end(),
+                                [&deviceId](const DeviceRecord &item)
+                                { return item.id == deviceId; });
+                            if (persistedDevice == persistedRecords.end() ||
+                                currentModeValue(*persistedDevice, property) !=
+                                    action["value"])
+                            {
+                                throw std::runtime_error(
+                                    "The requested state was not persisted.");
+                            }
+                            action["status"] = "applied";
+                            ++applied;
+                        }
+                        catch (const std::exception &applyError)
+                        {
+                            action["status"] = "failed";
+                            action["reason"] = applyError.what();
+                            ++failed;
+                        }
+                    }
+
+                    if (applied == 0)
+                    {
+                        const std::string seasonId =
+                            preview.selection["seasonId"].get<std::string>();
+                        const std::string moodId =
+                            preview.selection["moodId"].get<std::string>();
+                        const auto recentHistory = home.getModeHistory(1);
+                        long long historyId = 0;
+                        bool historyEntryCreated = false;
+                        const std::string historyDetails =
+                            json({
+                                {"selection", preview.selection},
+                                {"actions", actions}})
+                                .dump();
+                        if (!recentHistory.empty() &&
+                            recentHistory.front().outcome == "no_changes" &&
+                            recentHistory.front().seasonId == seasonId &&
+                            recentHistory.front().moodId == moodId &&
+                            recentHistory.front().detailsJson == historyDetails)
+                        {
+                            historyId = recentHistory.front().id;
+                        }
+                        else
+                        {
+                            ModeHistoryRecord history{
+                                0,
+                                seasonId,
+                                moodId,
+                                static_cast<long long>(std::time(nullptr)),
+                                "no_changes",
+                                historyDetails,
+                                "[]",
+                                "[]",
+                                0};
+                            if (!home.recordModeHistory(history))
+                            {
+                                res.status = 500;
+                                res.set_content(
+                                    json({
+                                        {"error", "No device changes were made, but the mode result could not be persisted."},
+                                        {"success", false},
+                                        {"outcome", "no_changes"},
+                                        {"actions", actions},
+                                        {"historyPersisted", false}})
+                                        .dump(),
+                                    "application/json");
+                                return;
+                            }
+                            historyId = history.id;
+                            historyEntryCreated = true;
+                        }
+                        res.set_content(
+                            json({
+                                {"success", false},
+                                {"outcome", "no_changes"},
+                                {"actions", actions},
+                                {"historyId", historyId},
+                                {"historyPersisted", true},
+                                {"historyEntryCreated", historyEntryCreated},
+                                {"message", skipped > 0
+                                    ? "All applicable settings were skipped or already unchanged."
+                                    : "No device changes were needed."}})
+                                .dump(),
+                            "application/json");
+                        return;
+                    }
+
+                    const bool partial = skipped > 0 || failed > 0;
+                    const std::string seasonId =
+                        preview.selection["seasonId"].get<std::string>();
+                    const std::string moodId =
+                        preview.selection["moodId"].get<std::string>();
+                    ModeHistoryRecord history{
+                        0,
+                        seasonId,
+                        moodId,
+                        static_cast<long long>(std::time(nullptr)),
+                        partial ? "partial" : "applied",
+                        json({
+                            {"selection", preview.selection},
+                            {"actions", actions}})
+                            .dump(),
+                        snapshot.dump(),
+                        "[]",
+                        0};
+                    if (!home.recordModeHistory(history))
+                    {
+                        res.status = 500;
+                        res.set_content(
+                            json({
+                                {"error", "Device changes were made, but mode history could not be persisted."},
+                                {"success", false},
+                                {"outcome", partial ? "partial" : "applied"},
+                                {"actions", actions},
+                                {"historyPersisted", false}})
+                                .dump(),
+                            "application/json");
+                        return;
+                    }
+                    res.set_content(
+                        json({
+                            {"success", !partial},
+                            {"outcome", partial ? "partial" : "applied"},
+                            {"actions", actions},
+                            {"historyId", history.id},
+                            {"historyPersisted", true},
+                            {"summary", {
+                                {"applied", applied},
+                                {"skipped", skipped},
+                                {"failed", failed}}}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::parse_error &)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"Request body must be valid JSON."})",
+                        "application/json");
+                }
+                catch (const json::exception &error)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                }
+            });
+
+        server.Post(
+            "/api/modes/restore",
+            [&home](const httplib::Request &req, httplib::Response &res)
+            {
+                try
+                {
+                    const json body = json::parse(req.body);
+                    if (!body.is_object() || body.size() < 1 ||
+                        body.size() > 2 ||
+                        !body.contains("confirmed") ||
+                        !body["confirmed"].is_boolean() ||
+                        !body["confirmed"].get<bool>())
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"Explicit confirmed:true is required to restore a mode snapshot."})",
+                            "application/json");
+                        return;
+                    }
+                    if (body.contains("roomName") &&
+                        (!body["roomName"].is_string() ||
+                         body["roomName"].get<std::string>().empty() ||
+                         !home.roomExists(body["roomName"].get<std::string>())))
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"roomName must identify an existing room."})",
+                            "application/json");
+                        return;
+                    }
+                    ModeHistoryRecord history;
+                    bool hasHistory = false;
+                    if (body.contains("roomName"))
+                    {
+                        const std::string roomName =
+                            body["roomName"].get<std::string>();
+                        for (const ModeHistoryRecord &candidate :
+                             home.getModeHistory(200))
+                        {
+                            if (candidate.restoredAt != 0 ||
+                                candidate.snapshotJson.empty() ||
+                                candidate.snapshotJson == "[]")
+                                continue;
+                            const json details =
+                                json::parse(candidate.detailsJson);
+                            const json selectedRooms =
+                                details.is_object() &&
+                                        details.contains("selection")
+                                    ? details["selection"].value(
+                                          "roomNames", json::array())
+                                    : json::array();
+                            if (selectedRooms.is_array() &&
+                                std::find(
+                                    selectedRooms.begin(),
+                                    selectedRooms.end(),
+                                    roomName) != selectedRooms.end())
+                            {
+                                history = candidate;
+                                hasHistory = true;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        hasHistory =
+                            home.getLatestRestorableModeHistory(history);
+                    }
+                    if (!hasHistory)
+                    {
+                        res.status = 404;
+                        res.set_content(
+                            R"({"error":"There is no unapplied mode snapshot available for this room."})",
+                            "application/json");
+                        return;
+                    }
+                    const json snapshot = json::parse(history.snapshotJson);
+                    json actions = json::array();
+                    bool complete = true;
+                    for (const json &entry : snapshot)
+                    {
+                        const std::string deviceId =
+                            entry.value("deviceId", "");
+                        const std::string property =
+                            entry.value("property", "");
+                        const json value =
+                            entry.value("value", json(nullptr));
+                        json action = {
+                            {"deviceId", deviceId},
+                            {"property", property},
+                            {"value", value}};
+                        const auto records = home.getAllDeviceRecords();
+                        const auto device = std::find_if(
+                            records.begin(), records.end(),
+                            [&deviceId](const DeviceRecord &item)
+                            { return item.id == deviceId; });
+                        if (device == records.end())
+                        {
+                            action["status"] = "skipped";
+                            action["reason"] = "Device no longer exists.";
+                            complete = false;
+                        }
+                        else if (currentModeValue(*device, property) == value)
+                        {
+                            action["status"] = "unchanged";
+                        }
+                        else
+                        {
+                            std::string reason;
+                            if (!modePropertySupported(
+                                    *device, property, value, reason))
+                            {
+                                action["status"] = "skipped";
+                                action["reason"] = reason;
+                                complete = false;
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    applyModeValue(
+                                        home, deviceId, property, value);
+                                    const auto persistedRecords =
+                                        home.getAllDeviceRecords();
+                                    const auto persistedDevice = std::find_if(
+                                        persistedRecords.begin(),
+                                        persistedRecords.end(),
+                                        [&deviceId](const DeviceRecord &item)
+                                        { return item.id == deviceId; });
+                                    if (persistedDevice == persistedRecords.end() ||
+                                        currentModeValue(*persistedDevice, property) != value)
+                                    {
+                                        throw std::runtime_error(
+                                            "The restored state was not persisted.");
+                                    }
+                                    action["status"] = "restored";
+                                }
+                                catch (const std::exception &restoreError)
+                                {
+                                    action["status"] = "failed";
+                                    action["reason"] = restoreError.what();
+                                    complete = false;
+                                }
+                            }
+                        }
+                        actions.push_back(std::move(action));
+                    }
+                    const long long restoredAt = complete
+                        ? static_cast<long long>(std::time(nullptr))
+                        : 0;
+                    if (!home.updateModeHistoryRestore(
+                            history.id, actions.dump(), restoredAt))
+                    {
+                        res.status = 500;
+                        res.set_content(
+                            json({
+                                {"error", "Restore was processed, but the restore result could not be persisted."},
+                                {"success", false},
+                                {"actions", actions}})
+                                .dump(),
+                            "application/json");
+                        return;
+                    }
+                    res.set_content(
+                        json({
+                            {"success", complete},
+                            {"outcome", complete ? "restored" : "partial"},
+                            {"historyId", history.id},
+                            {"actions", actions}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::parse_error &)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"Request body must be valid JSON."})",
+                        "application/json");
+                }
+                catch (const json::exception &error)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                }
+            });
+
+        server.Get(
+            "/api/modes/history",
+            [&home](const httplib::Request &req, httplib::Response &res)
+            {
+                int limit = 50;
+                try
+                {
+                    if (req.has_param("limit"))
+                        limit = std::stoi(req.get_param_value("limit"));
+                }
+                catch (const std::exception &)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"limit must be an integer from 1 to 200."})",
+                        "application/json");
+                    return;
+                }
+                if (limit < 1 || limit > 200)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"limit must be an integer from 1 to 200."})",
+                        "application/json");
+                    return;
+                }
+                json result = json::array();
+                try
+                {
+                    for (const ModeHistoryRecord &history :
+                         home.getModeHistory(limit))
+                        result.push_back(serializeModeHistory(history));
+                }
+                catch (const std::exception &error)
+                {
+                    res.status = 500;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                    return;
+                }
+                res.set_content(result.dump(), "application/json");
             });
 
         std::cout << "\nSmartHomeOS API is starting...\n";

@@ -108,6 +108,17 @@ public:
         int limit = 50) const;
     bool getAutomationEnabled() const;
     bool setAutomationEnabled(bool enabled);
+
+    bool saveModePreset(const ModePresetRecord &preset);
+    std::vector<ModePresetRecord> getModePresets(
+        const std::string &modeType) const;
+    bool recordModeHistory(ModeHistoryRecord &history);
+    std::vector<ModeHistoryRecord> getModeHistory(int limit) const;
+    bool getLatestRestorableModeHistory(ModeHistoryRecord &history) const;
+    bool updateModeHistoryRestore(
+        long long id,
+        const std::string &restoreDetailsJson,
+        long long restoredAt);
 };
 
 #endif

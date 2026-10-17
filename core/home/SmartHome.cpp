@@ -1175,3 +1175,58 @@ bool SmartHome::setAutomationEnabled(bool enabled)
     std::lock_guard<std::mutex> lock(homeMutex);
     return database.setAutomationEnabled(enabled);
 }
+
+bool SmartHome::saveModePreset(const ModePresetRecord &preset)
+{
+    if ((preset.modeType != "season" && preset.modeType != "mood") ||
+        preset.presetId.empty() || preset.overridesJson.empty() ||
+        preset.updatedAt <= 0)
+        return false;
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.saveModePreset(preset);
+}
+
+std::vector<ModePresetRecord> SmartHome::getModePresets(
+    const std::string &modeType) const
+{
+    if (modeType != "season" && modeType != "mood")
+        return {};
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadModePresets(modeType);
+}
+
+bool SmartHome::recordModeHistory(ModeHistoryRecord &history)
+{
+    if (history.appliedAt <= 0 || history.outcome.empty() ||
+        history.detailsJson.empty() || history.snapshotJson.empty())
+        return false;
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.addModeHistory(history);
+}
+
+std::vector<ModeHistoryRecord> SmartHome::getModeHistory(int limit) const
+{
+    if (limit < 1 || limit > 500)
+        return {};
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadModeHistory(limit);
+}
+
+bool SmartHome::getLatestRestorableModeHistory(
+    ModeHistoryRecord &history) const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadLatestRestorableModeHistory(history);
+}
+
+bool SmartHome::updateModeHistoryRestore(
+    long long id,
+    const std::string &restoreDetailsJson,
+    long long restoredAt)
+{
+    if (id <= 0 || restoreDetailsJson.empty() || restoredAt < 0)
+        return false;
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.updateModeHistoryRestore(
+        id, restoreDetailsJson, restoredAt);
+}

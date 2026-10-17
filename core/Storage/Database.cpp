@@ -6,6 +6,68 @@
 #include <fstream>
 #include <ctime>
 
+namespace
+{
+    bool createMigrationBackup(sqlite3 *source, const std::string &filename,
+                               int version)
+    {
+        std::string backupPath;
+        for (int suffix = 0; suffix < 100; ++suffix)
+        {
+            backupPath = filename + ".pre-v" + std::to_string(version) +
+                         "-" + std::to_string(std::time(nullptr)) + "-" +
+                         std::to_string(suffix) + ".bak";
+            std::ifstream existingBackup(backupPath, std::ios::binary);
+            if (!existingBackup.good())
+                break;
+            backupPath.clear();
+        }
+        if (backupPath.empty())
+        {
+            std::cerr << "Could not choose a unique pre-v"
+                      << version << " migration backup path.\n";
+            return false;
+        }
+
+        sqlite3 *backupDatabase = nullptr;
+        if (sqlite3_open(backupPath.c_str(), &backupDatabase) != SQLITE_OK)
+        {
+            std::cerr << "Could not create pre-v" << version
+                      << " migration backup: "
+                      << (backupDatabase != nullptr
+                              ? sqlite3_errmsg(backupDatabase)
+                              : "unknown SQLite error")
+                      << '\n';
+            if (backupDatabase != nullptr)
+                sqlite3_close(backupDatabase);
+            return false;
+        }
+
+        sqlite3_backup *backup = sqlite3_backup_init(
+            backupDatabase, "main", source, "main");
+        if (backup == nullptr)
+        {
+            std::cerr << "Could not initialize pre-v" << version
+                      << " migration backup: "
+                      << sqlite3_errmsg(backupDatabase) << '\n';
+            sqlite3_close(backupDatabase);
+            return false;
+        }
+        const int backupResult = sqlite3_backup_step(backup, -1);
+        const int finishResult = sqlite3_backup_finish(backup);
+        const bool backupSucceeded =
+            backupResult == SQLITE_DONE && finishResult == SQLITE_OK;
+        const int closeResult = sqlite3_close(backupDatabase);
+        if (!backupSucceeded || closeResult != SQLITE_OK)
+        {
+            std::cerr << "Could not complete pre-v" << version
+                      << " database backup.\n";
+            return false;
+        }
+        return true;
+    }
+}
+
 Database::Database(const std::string &filename)
     : db(nullptr),
       filename(filename)
@@ -70,7 +132,7 @@ bool Database::initializeSchema()
             ? sqlite3_column_int(versionStatement, 0)
             : -1;
     sqlite3_finalize(versionStatement);
-    if (schemaVersion < 0 || schemaVersion > 2)
+    if (schemaVersion < 0 || schemaVersion > 3)
     {
         std::cerr << "Unsupported database schema version: "
                   << schemaVersion << '\n';
@@ -263,12 +325,58 @@ bool Database::initializeSchema()
         migrationSucceeded = execute(
             "CREATE INDEX IF NOT EXISTS idx_automation_events_time "
             "ON automation_events(event_time DESC);");
-    if (migrationSucceeded)
+    if (migrationSucceeded && schemaVersion < 2)
         migrationSucceeded = execute("PRAGMA user_version = 2;");
     if (migrationSucceeded)
         migrationSucceeded = execute("COMMIT;");
     else
         execute("ROLLBACK;");
+
+    if (!migrationSucceeded)
+        return false;
+
+    if (schemaVersion < 3)
+    {
+        if (!createMigrationBackup(db, filename, 3))
+            return false;
+        if (!execute("BEGIN IMMEDIATE;"))
+            return false;
+
+        migrationSucceeded = execute(R"(
+            CREATE TABLE IF NOT EXISTS mode_presets (
+                mode_type TEXT NOT NULL
+                    CHECK (mode_type IN ('season', 'mood')),
+                preset_id TEXT NOT NULL,
+                overrides_json TEXT NOT NULL DEFAULT '[]',
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (mode_type, preset_id)
+            );
+        )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(R"(
+                CREATE TABLE IF NOT EXISTS mode_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    season_id TEXT NOT NULL DEFAULT '',
+                    mood_id TEXT NOT NULL DEFAULT '',
+                    applied_at INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '[]',
+                    snapshot_json TEXT NOT NULL DEFAULT '[]',
+                    restore_details_json TEXT NOT NULL DEFAULT '[]',
+                    restored_at INTEGER NOT NULL DEFAULT 0
+                );
+            )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(
+                "CREATE INDEX IF NOT EXISTS idx_mode_history_applied_at "
+                "ON mode_history(applied_at DESC);");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("PRAGMA user_version = 3;");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("COMMIT;");
+        else
+            execute("ROLLBACK;");
+    }
 
     return migrationSucceeded;
 }
@@ -1119,6 +1227,232 @@ bool Database::setAutomationEnabled(bool enabled)
     if (result != SQLITE_DONE)
     {
         std::cerr << "Save automation setting failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return true;
+}
+
+bool Database::saveModePreset(const ModePresetRecord &preset)
+{
+    const char *sql = R"(
+        INSERT INTO mode_presets (mode_type, preset_id, overrides_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(mode_type, preset_id) DO UPDATE SET
+            overrides_json = excluded.overrides_json,
+            updated_at = excluded.updated_at;
+    )";
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare mode preset save failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, preset.modeType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, preset.presetId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, preset.overridesJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 4, preset.updatedAt);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save mode preset failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return true;
+}
+
+std::vector<ModePresetRecord> Database::loadModePresets(
+    const std::string &modeType) const
+{
+    std::vector<ModePresetRecord> presets;
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT mode_type, preset_id, overrides_json, updated_at
+        FROM mode_presets
+        WHERE mode_type = ?
+        ORDER BY preset_id;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load mode presets failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return presets;
+    }
+    sqlite3_bind_text(statement, 1, modeType.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        presets.push_back({
+            text(0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3)});
+    }
+    sqlite3_finalize(statement);
+    return presets;
+}
+
+bool Database::addModeHistory(ModeHistoryRecord &history)
+{
+    const char *sql = R"(
+        INSERT INTO mode_history (
+            season_id, mood_id, applied_at, outcome, details_json,
+            snapshot_json, restore_details_json, restored_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    )";
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare mode history insert failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, history.seasonId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, history.moodId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 3, history.appliedAt);
+    sqlite3_bind_text(statement, 4, history.outcome.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 5, history.detailsJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 6, history.snapshotJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 7, history.restoreDetailsJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 8, history.restoredAt);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save mode history failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    history.id = sqlite3_last_insert_rowid(db);
+    return true;
+}
+
+std::vector<ModeHistoryRecord> Database::loadModeHistory(int limit) const
+{
+    std::vector<ModeHistoryRecord> history;
+    if (limit < 1 || limit > 500)
+        return history;
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, season_id, mood_id, applied_at, outcome, details_json,
+               snapshot_json, restore_details_json, restored_at
+        FROM mode_history
+        ORDER BY applied_at DESC, id DESC
+        LIMIT ?;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load mode history failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return history;
+    }
+    sqlite3_bind_int(statement, 1, limit);
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        history.push_back({
+            sqlite3_column_int64(statement, 0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3),
+            text(4),
+            text(5),
+            text(6),
+            text(7),
+            sqlite3_column_int64(statement, 8)});
+    }
+    sqlite3_finalize(statement);
+    return history;
+}
+
+bool Database::loadLatestRestorableModeHistory(
+    ModeHistoryRecord &history) const
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, season_id, mood_id, applied_at, outcome, details_json,
+               snapshot_json, restore_details_json, restored_at
+        FROM mode_history
+        WHERE restored_at = 0 AND length(snapshot_json) > 2
+        ORDER BY applied_at DESC, id DESC
+        LIMIT 1;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare restorable mode history lookup failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    const int result = sqlite3_step(statement);
+    if (result == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        history = {
+            sqlite3_column_int64(statement, 0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3),
+            text(4),
+            text(5),
+            text(6),
+            text(7),
+            sqlite3_column_int64(statement, 8)};
+    }
+    else if (result != SQLITE_DONE)
+    {
+        std::cerr << "Restorable mode history lookup failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    }
+    sqlite3_finalize(statement);
+    return result == SQLITE_ROW;
+}
+
+bool Database::updateModeHistoryRestore(
+    long long id,
+    const std::string &restoreDetailsJson,
+    long long restoredAt)
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        UPDATE mode_history
+        SET restore_details_json = ?, restored_at = ?
+        WHERE id = ?;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare mode restore update failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, restoreDetailsJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 2, restoredAt);
+    sqlite3_bind_int64(statement, 3, id);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE || sqlite3_changes(db) == 0)
+    {
+        std::cerr << "Update mode restore history failed: "
                   << sqlite3_errmsg(db) << '\n';
         return false;
     }

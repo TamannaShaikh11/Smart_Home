@@ -66,6 +66,27 @@ struct AutomationEventRecord
     std::string settingsChanged;
 };
 
+struct ModePresetRecord
+{
+    std::string modeType;
+    std::string presetId;
+    std::string overridesJson;
+    long long updatedAt = 0;
+};
+
+struct ModeHistoryRecord
+{
+    long long id = 0;
+    std::string seasonId;
+    std::string moodId;
+    long long appliedAt = 0;
+    std::string outcome;
+    std::string detailsJson;
+    std::string snapshotJson;
+    std::string restoreDetailsJson = "[]";
+    long long restoredAt = 0;
+};
+
 class Database
 {
 private:
@@ -110,6 +131,17 @@ public:
         int limit = 50) const;
     bool getAutomationEnabled() const;
     bool setAutomationEnabled(bool enabled);
+
+    bool saveModePreset(const ModePresetRecord &preset);
+    std::vector<ModePresetRecord> loadModePresets(
+        const std::string &modeType) const;
+    bool addModeHistory(ModeHistoryRecord &history);
+    std::vector<ModeHistoryRecord> loadModeHistory(int limit) const;
+    bool loadLatestRestorableModeHistory(ModeHistoryRecord &history) const;
+    bool updateModeHistoryRestore(
+        long long id,
+        const std::string &restoreDetailsJson,
+        long long restoredAt);
 
     bool renameRoom(
         const std::string &oldName,

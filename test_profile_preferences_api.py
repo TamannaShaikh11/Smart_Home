@@ -39,6 +39,9 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         destination = sqlite3.connect(cls.database_dir / "smarthome.db")
         try:
             source.backup(destination)
+            cls.baseline_schema_version = destination.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0]
             cls.baseline_device_count = destination.execute(
                 "SELECT COUNT(*) FROM devices"
             ).fetchone()[0]
@@ -405,7 +408,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.assertTrue({
             "light_type", "brightness", "color", "color_temperature"
         }.issubset(columns))
-        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 3)
         automation_tables = {
             row[0] for row in database.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -415,30 +418,36 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "automation_enrollments",
             "automation_events",
             "automation_settings",
+            "mode_presets",
+            "mode_history",
         }.issubset(automation_tables))
         database.close()
         self.assertEqual(original_device_count, self.baseline_device_count)
 
-        backups = list(self.database_dir.glob("smarthome.db.pre-v2-*.bak"))
-        self.assertEqual(len(backups), 1)
-        backup_db = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
+        backups = list(self.database_dir.glob("smarthome.db.pre-v3-*.bak"))
         self.assertEqual(
-            backup_db.execute("PRAGMA integrity_check").fetchone()[0],
-            "ok",
+            len(backups),
+            1 if self.baseline_schema_version < 3 else 0,
         )
-        backup_columns = {
-            row[1] for row in backup_db.execute("PRAGMA table_info(devices)")
-        }
-        self.assertIn("light_type", backup_columns)
-        self.assertEqual(
-            backup_db.execute("PRAGMA user_version").fetchone()[0],
-            1,
-        )
-        self.assertEqual(
-            backup_db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
-            self.baseline_device_count,
-        )
-        backup_db.close()
+        if backups:
+            backup_db = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
+            self.assertEqual(
+                backup_db.execute("PRAGMA integrity_check").fetchone()[0],
+                "ok",
+            )
+            backup_columns = {
+                row[1] for row in backup_db.execute("PRAGMA table_info(devices)")
+            }
+            self.assertIn("light_type", backup_columns)
+            self.assertEqual(
+                backup_db.execute("PRAGMA user_version").fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                backup_db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
+                self.baseline_device_count,
+            )
+            backup_db.close()
 
         _, original_devices = self.request("GET", "/api/devices")
         self.assertGreaterEqual(len(original_devices), original_device_count)
@@ -715,6 +724,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         profile_id = f"automation_profile_{suffix}"
         empty_profile_id = f"automation_empty_{suffix}"
 
+        self.request(
+            "PUT",
+            "/api/automation/settings",
+            {"enabled": False},
+        )
         _, initial_status = self.request(
             "GET", "/api/automation/status"
         )

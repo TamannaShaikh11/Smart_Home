@@ -9,7 +9,10 @@ import {
   useState,
 } from "react";
 
-const API_URL = "http://localhost:8080/api";
+const API_URL =
+  import.meta.env.VITE_SMARTHOME_API_URL ?? "http://localhost:8080/api";
+const FACE_SERVICE_URL =
+  import.meta.env.VITE_SMARTHOME_FACE_URL ?? "http://127.0.0.1:8765";
 
 const DEFAULT_TARIFF = {
   slab1: 3.96,
@@ -43,6 +46,19 @@ async function getApiError(response) {
   } catch {
     return `Request failed (${response.status})`;
   }
+}
+
+async function fetchFaceJson(path, options = {}) {
+  const response = await fetch(`${FACE_SERVICE_URL}${path}`, options);
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    if (response.ok) throw new Error("Local face service returned invalid JSON.");
+  }
+  if (!response.ok)
+    throw new Error(data.error || `Local face service request failed (${response.status})`);
+  return data;
 }
 
 function formatDuration(seconds) {
@@ -167,17 +183,55 @@ function App() {
     return response.json();
   };
 
-  const stopCamera = () => {
+  const stopCamera = async (finalStatus = "disabled") => {
+    const session = cameraSessionRef.current;
     cameraRequestId.current += 1;
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
+    cameraSessionRef.current = null;
     setCameraStream(null);
+    setCameraSession(null);
     setCameraStarting(false);
-    setCameraStatus("disabled");
-    setCameraError("");
+    setCameraStatus(finalStatus);
+    if (finalStatus === "disabled") setCameraError("");
+    if (session) {
+      const cleanupErrors = [];
+      try {
+        await fetchFaceJson(
+          `/recognition/sessions/${encodeURIComponent(session.sessionId)}`,
+          { method: "DELETE" }
+        );
+      } catch (err) {
+        if (!err.message.includes("(404)")) cleanupErrors.push(err.message);
+      }
+      try {
+        await fetchJson(
+          `${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}`,
+          { method: "DELETE" }
+        );
+      } catch (err) {
+        if (!err.message.includes("(404)")) cleanupErrors.push(err.message);
+      }
+      if (cleanupErrors.length > 0)
+        setCameraError(`Camera stopped locally, but session cleanup reported: ${cleanupErrors.join("; ")}`);
+    }
   };
 
+  useEffect(() => {
+    stopCameraRef.current = stopCamera;
+  });
+
   const startCamera = async () => {
+    if (!selectedRoom || selectedRoom === "All Rooms") {
+      setCameraStatus("error");
+      setCameraError("Select one room before starting recognition.");
+      return;
+    }
+    if (!automationEnabled) {
+      setCameraStatus("error");
+      setCameraError("Enable camera automation before starting recognition.");
+      return;
+    }
     const requestId = cameraRequestId.current + 1;
     cameraRequestId.current = requestId;
     setCameraStarting(true);
@@ -191,28 +245,78 @@ function App() {
     }
 
     try {
+      await fetchFaceJson("/health");
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: false,
       });
+      cameraStreamRef.current = stream;
       if (cameraRequestId.current !== requestId) {
         stream.getTracks().forEach((track) => track.stop());
+        cameraStreamRef.current = null;
         return;
       }
-      cameraStreamRef.current = stream;
+      const session = await fetchJson(`${API_URL}/automation/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomName: selectedRoom }),
+      });
+      cameraSessionRef.current = session;
+      await fetchFaceJson("/recognition/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: session.sessionId,
+          roomName: selectedRoom,
+        }),
+      });
+      setCameraSession(session);
       setCameraStream(stream);
       setCameraStatus("active");
+      setRecognition({
+        status: "pending",
+        displayName: "",
+        enrollmentId: "",
+      });
+      setAutomationPreview(null);
+      handledEnrollmentRef.current = "";
     } catch (err) {
       if (cameraRequestId.current !== requestId) return;
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+      setCameraStream(null);
+      const session = cameraSessionRef.current;
+      cameraSessionRef.current = null;
+      if (session?.sessionId) {
+        try {
+          await fetchFaceJson(
+            `/recognition/sessions/${encodeURIComponent(session.sessionId)}`,
+            { method: "DELETE" }
+          );
+        } catch {
+          // The service may have rejected startup before creating a session.
+        }
+        try {
+          await fetchJson(
+            `${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}`,
+            { method: "DELETE" }
+          );
+        } catch {
+          // The API may have already invalidated this session.
+        }
+      }
       if (err.name === "NotAllowedError" || err.name === "SecurityError") {
         setCameraStatus("denied");
-        setCameraError("Camera permission was denied. You can change it in your browser site settings.");
+        setCameraError("Camera permission was denied. Change the localhost site permission, then retry.");
       } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
         setCameraStatus("unavailable");
-        setCameraError("No camera device is available to this browser.");
+        setCameraError("Camera Offline: no camera device is available to this browser.");
+      } else if (String(err.message).includes("Failed to fetch")) {
+        setCameraStatus("unavailable");
+        setCameraError("Camera Automation service is offline. Manual Control remains available.");
       } else {
         setCameraStatus("error");
-        setCameraError(`Could not start the camera: ${err.message}`);
+        setCameraError(`Could not start recognition: ${err.message}`);
       }
     } finally {
       if (cameraRequestId.current === requestId) setCameraStarting(false);
@@ -277,14 +381,37 @@ function App() {
   const [assistantMessages, setAssistantMessages] = useState([]);
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [assistantError, setAssistantError] = useState("");
+  const [roomOperatingMode, setRoomOperatingMode] = useState("manual");
+  const [automationEnabled, setAutomationEnabled] = useState(false);
+  const [automationStatus, setAutomationStatus] = useState("checking");
+  const [automationError, setAutomationError] = useState("");
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [automationSession, setCameraSession] = useState(null);
+  const [recognition, setRecognition] = useState({
+    status: "waiting",
+    displayName: "",
+    enrollmentId: "",
+  });
+  const [automationPreview, setAutomationPreview] = useState(null);
+  const [automationApplyResult, setAutomationApplyResult] = useState(null);
+  const [automationEvents, setAutomationEvents] = useState([]);
+  const [enrollments, setEnrollments] = useState([]);
+  const [enrollmentProfileId, setEnrollmentProfileId] = useState("");
+  const [enrollmentConsent, setEnrollmentConsent] = useState(false);
+  const [enrollmentBusy, setEnrollmentBusy] = useState(false);
+  const [enrollmentMessage, setEnrollmentMessage] = useState("");
+  const [deletingEnrollment, setDeletingEnrollment] = useState("");
   const [cameraStatus, setCameraStatus] = useState("disabled");
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraStarting, setCameraStarting] = useState(false);
-  const [cameraRoom, setCameraRoom] = useState("");
-  const [cameraError, setCameraError] = useState("");
+  const setCameraError = setAutomationError;
   const cameraVideoRef = useRef(null);
   const cameraStreamRef = useRef(null);
+  const cameraSessionRef = useRef(null);
+  const stopCameraRef = useRef(null);
   const cameraRequestId = useRef(0);
+  const recognitionIntervalRef = useRef(null);
+  const handledEnrollmentRef = useRef("");
 
   useEffect(() => {
     const video = cameraVideoRef.current;
@@ -292,12 +419,59 @@ function App() {
     return () => {
       if (video) video.srcObject = null;
     };
-  }, [cameraStream, activeSection]);
+  }, [cameraStream, activeSection, roomOperatingMode]);
 
   useEffect(() => () => {
+    const session = cameraSessionRef.current;
     cameraRequestId.current += 1;
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
     cameraStreamRef.current = null;
+    if (session?.sessionId) {
+      fetch(`${FACE_SERVICE_URL}/recognition/sessions/${encodeURIComponent(session.sessionId)}`, {
+        method: "DELETE",
+        keepalive: true,
+      }).catch(() => {});
+      fetch(`${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}`, {
+        method: "DELETE",
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadAutomationState = async () => {
+      try {
+        const [status, enrollmentData, eventData] = await Promise.all([
+          fetchJson(`${API_URL}/automation/status`),
+          fetchJson(`${API_URL}/automation/enrollments`),
+          fetchJson(`${API_URL}/automation/events?limit=5`),
+        ]);
+        if (!active) return;
+        setAutomationEnabled(Boolean(status.enabled));
+        setEnrollments(Array.isArray(enrollmentData) ? enrollmentData : []);
+        setAutomationEvents(Array.isArray(eventData) ? eventData : []);
+        try {
+          await fetchFaceJson("/health");
+          setAutomationStatus("online");
+        } catch {
+          setAutomationStatus("offline");
+        }
+      } catch (err) {
+        if (!active) return;
+        try {
+          await fetchFaceJson("/health");
+          if (active) setAutomationStatus("online");
+        } catch {
+          if (active) setAutomationStatus("offline");
+        }
+        setAutomationError(`Could not load automation settings: ${err.message}`);
+      }
+    };
+    loadAutomationState();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const loadProfiles = useCallback(async () => {
@@ -316,6 +490,333 @@ function App() {
       setProfilesLoading(false);
     }
   }, []);
+
+  const refreshAutomationMetadata = async () => {
+    const [enrollmentData, eventData] = await Promise.all([
+      fetchJson(`${API_URL}/automation/enrollments`),
+      fetchJson(`${API_URL}/automation/events?limit=5`),
+    ]);
+    setEnrollments(Array.isArray(enrollmentData) ? enrollmentData : []);
+    setAutomationEvents(Array.isArray(eventData) ? eventData : []);
+  };
+
+  const updateAutomationEnabled = async (enabled) => {
+    setAutomationBusy(true);
+    setAutomationError("");
+    try {
+      if (!enabled && cameraSessionRef.current)
+        await stopCamera();
+      const result = await fetchJson(`${API_URL}/automation/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      setAutomationEnabled(result.enabled);
+      try {
+        await fetchFaceJson("/health");
+        setAutomationStatus("online");
+      } catch {
+        setAutomationStatus("offline");
+      }
+      if (!enabled) {
+        setRecognition({ status: "waiting", displayName: "", enrollmentId: "" });
+        setAutomationPreview(null);
+      }
+    } catch (err) {
+      setAutomationError(`Could not update automation setting: ${err.message}`);
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const enrollHouseholdMember = async (event) => {
+    event.preventDefault();
+    const profile = profiles.find((item) => item.id === enrollmentProfileId);
+    if (!profile || !enrollmentConsent || enrollmentBusy || cameraSessionRef.current)
+      return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setEnrollmentMessage("This browser does not support local camera access.");
+      return;
+    }
+
+    setEnrollmentBusy(true);
+    setEnrollmentMessage("Requesting camera access for local enrollment…");
+    let stream;
+    let createdEnrollmentId = "";
+    try {
+      await fetchFaceJson("/health");
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false,
+      });
+      cameraStreamRef.current = stream;
+      setCameraStream(stream);
+      setCameraStatus("enrolling");
+
+      const video = cameraVideoRef.current;
+      if (!video) throw new Error("The local enrollment preview is unavailable.");
+      video.srcObject = stream;
+      await video.play();
+      const readyDeadline = Date.now() + 6000;
+      while (video.readyState < 2 && Date.now() < readyDeadline)
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      if (video.readyState < 2)
+        throw new Error("Camera did not provide a usable local video frame.");
+
+      setEnrollmentMessage("Capturing 10 local samples. Keep one consenting person's face centered.");
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("Could not create a local enrollment frame.");
+      const scale = Math.min(1, 640 / video.videoWidth);
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      const frames = [];
+      for (let index = 0; index < 10; index += 1) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        frames.push(canvas.toDataURL("image/jpeg", 0.72));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+
+      const enrollment = await fetchJson(`${API_URL}/automation/enrollments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileId: profile.id, consent: true }),
+      });
+      createdEnrollmentId = enrollment.id;
+      await fetchFaceJson(
+        `/enrollments/${encodeURIComponent(enrollment.id)}/train`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            displayName: enrollment.profileName,
+            frames,
+          }),
+        }
+      );
+      await refreshAutomationMetadata();
+      setEnrollmentMessage(`Local enrollment linked to ${profile.displayName}. Face samples are encrypted on this Windows account.`);
+      setEnrollmentConsent(false);
+    } catch (err) {
+      if (createdEnrollmentId) {
+        try {
+          await fetchJson(
+            `${API_URL}/automation/enrollments/${encodeURIComponent(createdEnrollmentId)}`,
+            { method: "DELETE" }
+          );
+        } catch (cleanupError) {
+          setEnrollmentMessage(
+            `Enrollment failed: ${err.message}. The profile link cleanup also failed: ${cleanupError.message}`
+          );
+        }
+      }
+      if (!createdEnrollmentId || !err.message.includes("cleanup also failed"))
+        setEnrollmentMessage(`Enrollment failed: ${err.message}`);
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+      setCameraStream(null);
+      setCameraStatus("disabled");
+      setEnrollmentBusy(false);
+    }
+  };
+
+  const removeEnrollment = async (enrollment) => {
+    if (!window.confirm(`Delete the local face enrollment linked to ${enrollment.profileName}?`))
+      return;
+    setDeletingEnrollment(enrollment.id);
+    setEnrollmentMessage("");
+    try {
+      try {
+        await fetchFaceJson(
+          `/enrollments/${encodeURIComponent(enrollment.id)}`,
+          { method: "DELETE" }
+        );
+      } catch (err) {
+        if (!err.message.includes("(404)")) throw err;
+      }
+      await fetchJson(
+        `${API_URL}/automation/enrollments/${encodeURIComponent(enrollment.id)}`,
+        { method: "DELETE" }
+      );
+      await refreshAutomationMetadata();
+      setEnrollmentMessage(`Enrollment for ${enrollment.profileName} was deleted.`);
+    } catch (err) {
+      setEnrollmentMessage(`Could not delete enrollment: ${err.message}`);
+    } finally {
+      setDeletingEnrollment("");
+    }
+  };
+
+  const applyAutomationPreview = async () => {
+    if (!automationSession || !automationPreview ||
+        recognition.status !== "matched" ||
+        recognition.enrollmentId !== automationPreview.enrollmentId ||
+        automationApplyResult?.success === true)
+      return;
+    setAutomationBusy(true);
+    setAutomationError("");
+    try {
+      const result = await fetchJson(
+        `${API_URL}/profiles/${encodeURIComponent(automationPreview.profileId)}/preferences/apply`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            roomName: automationSession.roomName,
+            automationSessionId: automationSession.sessionId,
+            confirmed: true,
+          }),
+        }
+      );
+      setAutomationApplyResult(result);
+      await Promise.all([
+        refreshAutomationMetadata(),
+        loadDashboard(false),
+        loadEnergySessions(),
+        loadEnergySummary(),
+      ]);
+    } catch (err) {
+      setAutomationError(`Could not apply the confirmed room preferences: ${err.message}`);
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!automationSession || !cameraStream || roomOperatingMode !== "camera")
+      return undefined;
+    let cancelled = false;
+    let processing = false;
+    const session = automationSession;
+
+    const recognizeFrame = async () => {
+      if (cancelled || processing) return;
+      const video = cameraVideoRef.current;
+      if (!video || video.readyState < 2 || video.videoWidth < 1) return;
+      processing = true;
+      try {
+        const backendStatus = await fetchJson(
+          `${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}`
+        );
+        if (!backendStatus.enabled || backendStatus.roomName !== session.roomName) {
+          setAutomationEnabled(Boolean(backendStatus.enabled));
+          throw new Error("The room recognition session was disabled or changed.");
+        }
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(1, 640 / video.videoWidth);
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (!context) throw new Error("Could not prepare a local recognition frame.");
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const result = await fetchFaceJson(
+          `/recognition/sessions/${encodeURIComponent(session.sessionId)}/frame`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              roomName: session.roomName,
+              frame: canvas.toDataURL("image/jpeg", 0.68),
+            }),
+          }
+        );
+        if (cancelled) return;
+        setRecognition((current) => ({
+          ...current,
+          ...result,
+          enrollmentId: result.enrollmentId ?? "",
+        }));
+        await fetchJson(
+          `${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}/observation`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              roomName: session.roomName,
+              status: result.status,
+              ...(result.status === "matched"
+                ? { enrollmentId: result.enrollmentId }
+                : {}),
+            }),
+          }
+        );
+        if (result.status === "matched" && result.enrollmentId) {
+          const key = `${session.sessionId}:${result.enrollmentId}`;
+          if (handledEnrollmentRef.current !== key) {
+            handledEnrollmentRef.current = key;
+            setAutomationApplyResult(null);
+            try {
+              const preview = await fetchJson(
+                `${API_URL}/automation/sessions/${encodeURIComponent(session.sessionId)}/resolve`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    roomName: session.roomName,
+                    enrollmentId: result.enrollmentId,
+                  }),
+                }
+              );
+              if (!cancelled) setAutomationPreview(preview);
+            } catch (err) {
+              if (!cancelled) {
+                setAutomationPreview(null);
+                setAutomationError(
+                  err.message.includes("No saved preferences")
+                    ? `${result.displayName} is recognized, but has no saved preferences for ${session.roomName}. Manual Control remains available.`
+                    : `Could not load the matched profile preferences: ${err.message}`
+                );
+              }
+            }
+          }
+        } else {
+          handledEnrollmentRef.current = "";
+          if (result.status === "unknown")
+            setAutomationError("");
+        }
+        setCameraStatus("active");
+      } catch (err) {
+        if (cancelled) return;
+        setCameraStatus("unavailable");
+        setAutomationStatus("offline");
+        setRecognition({ status: "failed", displayName: "", enrollmentId: "" });
+        setAutomationError(
+          `Camera Offline or automation service unavailable: ${err.message}. No occupancy is inferred.`
+        );
+        void stopCameraRef.current?.("unavailable");
+      } finally {
+        processing = false;
+      }
+    };
+
+    recognizeFrame();
+    recognitionIntervalRef.current = window.setInterval(recognizeFrame, 1100);
+    return () => {
+      cancelled = true;
+      window.clearInterval(recognitionIntervalRef.current);
+      recognitionIntervalRef.current = null;
+    };
+  }, [
+    automationSession,
+    cameraStream,
+    roomOperatingMode,
+  ]);
+
+  const changeSelectedRoom = async (roomName) => {
+    if (cameraSessionRef.current || cameraStarting)
+      await stopCamera();
+    setSelectedRoom(roomName);
+    setRoomOperatingMode("manual");
+    setAutomationPreview(null);
+    setAutomationApplyResult(null);
+  };
+
+  const switchToManualControl = async () => {
+    if (cameraSessionRef.current)
+      await stopCamera();
+    setRoomOperatingMode("manual");
+  };
 
   const createProfile = async (event) => {
     event.preventDefault();
@@ -1269,10 +1770,14 @@ function App() {
   };
 
   const goTo = (section) => {
-    if (section !== "camera" &&
-        (cameraStreamRef.current || cameraStarting))
+    const runningRoomSession =
+      cameraSessionRef.current || cameraStarting;
+    const enrollmentPreview =
+      activeSection === "camera" && cameraStreamRef.current;
+    if ((runningRoomSession && section !== "devices") ||
+        (enrollmentPreview && section !== "camera"))
     {
-      stopCamera();
+      void stopCamera();
     }
     setActiveSection(section);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1288,11 +1793,6 @@ function App() {
       <p className="stat-detail">{detail}</p>
     </article>
   );
-  const cameraRoomNames = rooms.map(getRoomLabel).filter(Boolean);
-  const activeCameraRoom = cameraRoomNames.includes(cameraRoom)
-    ? cameraRoom
-    : cameraRoomNames[0] ?? "";
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1312,7 +1812,7 @@ function App() {
             ["rooms", "⌂", "Room management"],
             ["energy", "ϟ", "Energy monitor"],
             ["assistant", "✦", "Energy assistant"],
-            ["camera", "◉", "Camera & occupancy"],
+            ["camera", "◉", "Face enrollments"],
             ["billing", "₹", "Bill estimator"],
             ["history", "◷", "Session history"],
             ["profiles", "♙", "Profiles & preferences"],
@@ -1331,7 +1831,7 @@ function App() {
             if (!name) return null;
             const meta = roomMeta(name);
             return (
-              <button className="room-nav-item" key={name} onClick={() => { setSelectedRoom(name); goTo("devices"); }}>
+              <button className="room-nav-item" key={name} onClick={() => { void changeSelectedRoom(name); goTo("devices"); }}>
                 <span>{meta.icon}</span><span>{name}</span>
                 <small>{devices.filter((d) => getRoomName(d) === name).length}</small>
               </button>
@@ -1582,8 +2082,10 @@ function App() {
           <div className="section-heading">
             <div><p className="eyebrow">CONTROL CENTER</p><h2>Devices <span className="count-chip">{filteredDevices.length}</span></h2><p className="section-subtitle">Your connected appliances, all in one place.</p></div>
             <div className="bulk-actions">
-              <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(true)}>Power all on</button>
-              <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(false)}>Power all off</button>
+              {(selectedRoom === "All Rooms" || roomOperatingMode === "manual") && <>
+                <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(true)}>Power all on</button>
+                <button className="secondary-button" disabled={bulkUpdating} onClick={() => bulkToggle(false)}>Power all off</button>
+              </>}
               <button className="primary-button" onClick={() => { setShowDeviceForm((v) => !v); setDeviceMessage(""); }}>{showDeviceForm ? "Cancel" : "＋ Add device"}</button>
             </div>
           </div>
@@ -1614,14 +2116,88 @@ function App() {
 
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input placeholder="Search devices or rooms…" value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌕</kbd></label>
-            <label className="filter-select"><span>Room</span><select value={selectedRoom} onChange={(e) => setSelectedRoom(e.target.value)}><option>All Rooms</option>{rooms.map((room) => { const name = typeof room === "string" ? room : room.name ?? room.roomName; return name ? <option key={name} value={name}>{name}</option> : null; })}</select></label>
+            <label className="filter-select"><span>Room</span><select value={selectedRoom} onChange={(e) => { void changeSelectedRoom(e.target.value); }}><option>All Rooms</option>{rooms.map((room) => { const name = typeof room === "string" ? room : room.name ?? room.roomName; return name ? <option key={name} value={name}>{name}</option> : null; })}</select></label>
           </div>
 
-          {loading ? <div className="empty-state"><div className="loading-orb" /><h3>Connecting to your home…</h3><p>Fetching the latest device status.</p></div> : Object.keys(deviceGroups).length === 0 ? <div className="empty-state"><span>⌁</span><h3>No devices found</h3><p>Try another search or add a device to get started.</p><button className="primary-button" onClick={() => setShowDeviceForm(true)}>＋ Add your first device</button></div> : Object.entries(deviceGroups).map(([roomName, roomDevices]) => {
+          {selectedRoom !== "All Rooms" && <section className="room-mode-panel panel" aria-label={`${selectedRoom} operating mode`}>
+            <div>
+              <p className="eyebrow">ROOM OPERATING MODE</p>
+              <h3>{selectedRoom}</h3>
+              <p className="section-subtitle">Choose local manual controls or explicitly start camera recognition for this room.</p>
+            </div>
+            <div className="room-mode-options" role="group" aria-label="Room operating mode">
+              <button type="button" className={`secondary-button ${roomOperatingMode === "manual" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "manual"} disabled={cameraStarting} onClick={() => { if (cameraSessionRef.current) void switchToManualControl(); else setRoomOperatingMode("manual"); }}>Manual Control</button>
+              <button type="button" className={`secondary-button ${roomOperatingMode === "camera" ? "mode-selected" : ""}`} aria-pressed={roomOperatingMode === "camera"} disabled={cameraStarting} onClick={() => setRoomOperatingMode("camera")}>Camera Automation</button>
+            </div>
+          </section>}
+
+          {roomOperatingMode === "camera" && selectedRoom !== "All Rooms" ? (
+            <section className="room-automation-grid">
+              <div className="panel room-automation-main">
+                <div className="room-automation-heading">
+                  <div><p className="eyebrow">ROOM-SCOPED RECOGNITION</p><h3>Camera Automation · {selectedRoom}</h3><p className="section-subtitle">Nothing starts until you press Start Recognition. This session is bound to {automationSession?.roomName ?? selectedRoom}.</p></div>
+                  <span className={`camera-status camera-status-${cameraStatus}`} role="status"><i />{cameraStatus === "active" ? "RECOGNITION ACTIVE" : cameraStatus === "unavailable" ? "CAMERA OFFLINE" : cameraStatus.toUpperCase()}</span>
+                </div>
+                {automationError && <div className="alert alert-error" role="alert">{automationError}</div>}
+                <div className="camera-controls">
+                  {cameraStream
+                    ? <video className="camera-preview" ref={cameraVideoRef} autoPlay muted playsInline aria-label={`Local camera preview for ${automationSession?.roomName ?? selectedRoom}`} />
+                    : <div className="camera-preview camera-preview-placeholder"><span>◉</span><strong>{cameraStatus === "unavailable" ? "Camera Offline" : "Recognition is stopped"}</strong><small>Camera frames remain in this browser and are sent only to the loopback face service.</small></div>}
+                  <div className="room-recognition-controls">
+                    <div className="global-automation-toggle">
+                      <span><strong>Global automation</strong><small>{automationEnabled ? "Enabled · room sessions still require an explicit start" : "Disabled by default"}</small></span>
+                      <button type="button" role="switch" aria-checked={automationEnabled} aria-label="Enable global camera automation" className={`toggle ${automationEnabled ? "toggle-on" : ""}`} disabled={automationBusy || cameraStarting} onClick={() => updateAutomationEnabled(!automationEnabled)}><span /></button>
+                    </div>
+                    {automationSession
+                      ? <button className="secondary-button danger-button" type="button" onClick={() => { void stopCamera(); }}>Stop Recognition</button>
+                      : <button className="primary-button" type="button" onClick={startCamera} disabled={!automationEnabled || cameraStarting || automationStatus !== "online"}>{cameraStarting ? "Starting local service…" : "Start Recognition"}</button>}
+                    <p className="fine-print">Python service: {automationStatus}. Recognition never changes devices until you review and confirm a preference preview.</p>
+                  </div>
+                </div>
+                <div className="occupancy-state" aria-live="polite">
+                  <span>Recognition result · selected room: {automationSession?.roomName ?? selectedRoom}</span>
+                  <strong>{recognition.status === "matched"
+                    ? `Matched: ${automationPreview?.profileName ?? recognition.displayName}`
+                    : recognition.status === "pending"
+                      ? `Matching pending (${recognition.observations ?? 0}/${recognition.requiredObservations ?? 3} consistent observations)`
+                      : recognition.status === "ambiguous"
+                        ? "Ambiguous: multiple faces detected"
+                        : recognition.status === "no_person"
+                          ? "No face currently detected"
+                          : recognition.status === "unknown"
+                            ? "Unknown identity"
+                            : recognition.status === "failed"
+                              ? "Recognition failed"
+                              : "Waiting for recognition"}</strong>
+                  <p>{recognition.status === "ambiguous"
+                    ? "No profile is selected when more than one face is present. Ensure only the consenting person is in frame; there is no automatic or arbitrary selection."
+                    : recognition.status === "no_person"
+                      ? "No personalized settings are eligible. This is not an occupancy or room-vacancy determination."
+                      : recognition.status === "unknown"
+                        ? "Unknown identities never load or apply household preferences."
+                        : "Face matching is local, probabilistic, and is not liveness detection or secure authentication."}</p>
+                </div>
+                {automationPreview && <section className="panel automation-preference-preview" aria-labelledby="automation-preview-title">
+                  <div className="form-heading">
+                    <div><p className="eyebrow">CONFIRMATION REQUIRED</p><h3 id="automation-preview-title">Preference preview · {automationPreview.roomName}</h3><p>Linked profile: {automationPreview.profileName} ({automationPreview.profileId})</p></div>
+                    <button type="button" className="primary-button" onClick={applyAutomationPreview} disabled={automationBusy || automationPreview.alreadyApplied || automationApplyResult?.success === true || recognition.status !== "matched" || recognition.enrollmentId !== automationPreview.enrollmentId}>{automationBusy ? "Applying…" : automationPreview.alreadyApplied ? "Already applied this session" : "Confirm and apply"}</button>
+                  </div>
+                  <div className="automation-preview-list">
+                    {automationPreview.preview.map((item, index) => <div className="bill-row" key={`${item.deviceId ?? item.setting}-${index}`}><span>{item.deviceName ?? item.deviceType}<small>{item.setting} · {item.status}</small></span><strong>{item.previousValue ?? "—"} → {item.value ?? "—"}</strong></div>)}
+                  </div>
+                  {automationApplyResult && <div className={`form-message ${automationApplyResult.success ? "is-success" : "is-error"}`} role="status">{automationApplyResult.success ? "Confirmed settings were applied and recorded." : "The operation completed with unsupported or failed settings; review the per-device result."}{automationApplyResult.actions?.map((item, index) => <small key={`${item.setting}-${item.deviceId ?? index}`}>{item.deviceName ?? item.deviceType ?? item.setting}: {item.status}{item.message ? ` — ${item.message}` : ""}</small>)}</div>}
+                  {recognition.status !== "matched" && <p className="fine-print">Application is paused because the currently observed identity is not a fresh single-person match.</p>}
+                </section>}
+                {automationEvents[0] && <p className="fine-print" role="status">Last automation event: {automationEvents[0].outcome} · {automationEvents[0].roomName} · {formatDate(automationEvents[0].eventTime)}</p>}
+                <button className="secondary-button" type="button" onClick={() => { void switchToManualControl(); }}>Switch to Manual Control</button>
+              </div>
+            </section>
+          ) : (
+          loading ? <div className="empty-state"><div className="loading-orb" /><h3>Connecting to your home…</h3><p>Fetching the latest device status.</p></div> : Object.keys(deviceGroups).length === 0 ? <div className="empty-state"><span>⌁</span><h3>No devices found</h3><p>Try another search or add a device to get started.</p><button className="primary-button" onClick={() => setShowDeviceForm(true)}>＋ Add your first device</button></div> : Object.entries(deviceGroups).map(([roomName, roomDevices]) => {
             const meta = roomMeta(roomName);
             const onCount = roomDevices.filter(isDeviceOn).length;
             return <div className="room-section" key={roomName}>
-              <div className="room-heading"><div className="room-title"><span className={`room-emoji ${meta.tint}`}>{meta.icon}</span><div><h3>{roomName}</h3><p>{onCount} of {roomDevices.length} devices active</p></div></div><button className="text-button" onClick={() => setSelectedRoom(roomName)}>View room →</button></div>
+              <div className="room-heading"><div className="room-title"><span className={`room-emoji ${meta.tint}`}>{meta.icon}</span><div><h3>{roomName}</h3><p>{onCount} of {roomDevices.length} devices active</p></div></div><button className="text-button" onClick={() => { void changeSelectedRoom(roomName); }}>View room →</button></div>
               <div className="device-grid">{roomDevices.map((device) => {
                 const id = getDeviceId(device);
                 const on = isDeviceOn(device);
@@ -1655,7 +2231,8 @@ function App() {
                 </article>;
               })}</div>
             </div>;
-          })}
+          })
+          )}
         </section>}
 
         {activeSection === "rooms" && <section id="rooms" className="content-section">
@@ -1793,38 +2370,53 @@ function App() {
         </section>}
 
         {activeSection === "camera" && <section id="camera" className="content-section">
-          <div className="section-heading"><div><p className="eyebrow">LOCAL AND OPT-IN</p><h2>Camera & occupancy</h2><p className="section-subtitle">Preview is available only after you choose Start camera and grant browser permission.</p></div><span className={`camera-status camera-status-${cameraStatus}`} role="status"><i />{cameraStatus === "active" ? "CAMERA ACTIVE" : cameraStatus.toUpperCase()}</span></div>
-          {cameraError && <div className="alert alert-error" role="alert">{cameraError}<button type="button" onClick={() => setCameraError("")} aria-label="Dismiss camera error">×</button></div>}
+          <div className="section-heading"><div><p className="eyebrow">LOCAL AND CONSENT-BASED</p><h2>Facial recognition setup</h2><p className="section-subtitle">Enroll consenting household members against existing SmartHomeOS profiles. Camera recognition starts only from a selected room's Camera Automation mode.</p></div><span className={`camera-status camera-status-${automationStatus}`} role="status"><i />FACE SERVICE {automationStatus.toUpperCase()}</span></div>
+          {automationError && <div className="alert alert-error" role="alert">{automationError}</div>}
+          {enrollmentMessage && <div className={`form-message ${enrollmentMessage.startsWith("Enrollment failed") || enrollmentMessage.startsWith("Could not") ? "is-error" : "is-success"}`} role="status">{enrollmentMessage}</div>}
           <div className="camera-layout">
             <section className="panel camera-panel">
-              <div className="camera-controls">
-                <label className="preference-room-select">Associated room
-                  <select value={activeCameraRoom} onChange={(event) => setCameraRoom(event.target.value)}>
-                    <option value="">Select a room</option>
-                    {cameraRoomNames.map((name) => <option value={name} key={name}>{name}</option>)}
+              <div className="global-automation-toggle">
+                <span><strong>Global camera automation</strong><small>{automationEnabled ? "Enabled · still requires a room-specific manual start and apply confirmation" : "Disabled by default; enable only when you want to use camera automation"}</small></span>
+                <button type="button" role="switch" aria-checked={automationEnabled} aria-label="Enable global camera automation" className={`toggle ${automationEnabled ? "toggle-on" : ""}`} disabled={automationBusy || Boolean(automationSession)} onClick={() => updateAutomationEnabled(!automationEnabled)}><span /></button>
+              </div>
+              {cameraStream && !automationSession
+                ? <video className="camera-preview" ref={cameraVideoRef} autoPlay muted playsInline aria-label="Temporary local enrollment camera preview" />
+                : <div className="camera-preview camera-preview-placeholder"><span>◉</span><strong>Enrollment preview is off</strong><small>Press Enroll member to request camera access and capture local samples.</small></div>}
+              <form className="device-form enrollment-form" onSubmit={enrollHouseholdMember}>
+                <div className="form-heading"><div><p className="eyebrow">EXPLICIT ENROLLMENT</p><h3>Link a face to an existing profile</h3></div></div>
+                <label>SmartHomeOS profile
+                  <select value={enrollmentProfileId} onChange={(event) => setEnrollmentProfileId(event.target.value)} required disabled={enrollmentBusy || Boolean(automationSession)}>
+                    <option value="">Select an existing profile</option>
+                    {profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.displayName}</option>)}
                   </select>
                 </label>
-                {cameraStatus === "active"
-                  ? <button className="secondary-button danger-button" type="button" onClick={stopCamera}>Stop camera</button>
-                  : <button className="primary-button" type="button" onClick={startCamera} disabled={cameraStarting || !activeCameraRoom}>{cameraStarting ? "Waiting for permission…" : "Start camera"}</button>}
+                <label className="checkbox-label"><input type="checkbox" checked={enrollmentConsent} onChange={(event) => setEnrollmentConsent(event.target.checked)} disabled={enrollmentBusy} required /> The person being enrolled has explicitly consented to local biometric face-template storage and matching.</label>
+                <button className="primary-button" type="submit" disabled={enrollmentBusy || !enrollmentConsent || !enrollmentProfileId || !profiles.length || Boolean(automationSession) || automationStatus !== "online"}>{enrollmentBusy ? "Capturing local samples…" : "Enroll consenting member"}</button>
+              </form>
+              <div className="enrollment-list">
+                <h3>Enrolled profiles</h3>
+                {enrollments.length === 0
+                  ? <p>No face enrollments are registered.</p>
+                  : enrollments.map((item) => <div className="enrollment-row" key={item.id}><span><strong>{item.profileName}</strong><small>Profile {item.profileId} · added {formatDate(item.createdAt)}</small></span><button type="button" className="secondary-button danger-button" disabled={Boolean(automationSession) || deletingEnrollment === item.id || automationStatus !== "online"} onClick={() => removeEnrollment(item)}>{deletingEnrollment === item.id ? "Deleting…" : "Delete enrollment"}</button></div>)}
               </div>
-              {cameraStream
-                ? <video className="camera-preview" ref={cameraVideoRef} autoPlay muted playsInline aria-label={`Live local camera preview for ${activeCameraRoom}`} />
-                : <div className="camera-preview camera-preview-placeholder"><span>◉</span><strong>Camera is off</strong><small>Live preview appears here only while camera access is enabled.</small></div>}
-              <div className="occupancy-state"><span>Occupancy</span><strong>Unknown</strong><p>No occupancy detector is configured. A camera preview is not evidence that a room is occupied or empty.</p></div>
             </section>
             <aside className="panel camera-privacy">
-              <h3>Privacy & limitations</h3>
+              <h3>Local processing and limitations</h3>
               <ul>
-                <li>Permission is requested only after you press Start camera.</li>
-                <li>Video is displayed locally in this browser; frames are not recorded, uploaded, or stored.</li>
-                <li>Stop the camera or leave this page to release the media tracks.</li>
-                <li>No person detection, identity recognition, or occupancy inference is performed.</li>
-                <li>Room association is local UI state and is not persisted to the backend.</li>
+                <li>OpenCV Haar face detection and LBPH matching run on this computer; raw frames are sent only to 127.0.0.1:8765 and are never persisted or logged.</li>
+                <li>Face crops are stored encrypted with the current Windows account's DPAPI protection in %LOCALAPPDATA%\SmartHomeOS.</li>
+                <li>Matching needs 3 consistent observations; the configurable distance threshold defaults to 55 (lower distances match).</li>
+                <li>Multiple detected faces are ambiguous; no person is arbitrarily selected and no preferences are applied.</li>
+                <li>No face is not evidence of an empty room. Camera failure is reported as Camera Offline.</li>
+                <li>Face matching is probabilistic and is not liveness detection, secure authentication, or a safety mechanism.</li>
               </ul>
-              <p className="fine-print">If permission is denied, allow camera access for localhost in browser site settings, then retry. Camera access requires a secure browser origin such as localhost.</p>
+              <p className="fine-print">Manual Control remains available without this Python service. Always obtain consent from each enrolled person and delete their enrollment when requested.</p>
             </aside>
           </div>
+          <section className="panel automation-event-list">
+            <h3>Recent automation events</h3>
+            {automationEvents.length === 0 ? <p>No confirmed automation applications have been recorded.</p> : automationEvents.map((item) => <div className="enrollment-row" key={item.id}><span><strong>{item.outcome} · {item.roomName}</strong><small>Profile {item.profileId || "—"} · {formatDate(item.eventTime)} · {item.settingsChanged.length} settings recorded</small></span></div>)}
+          </section>
         </section>}
 
         {activeSection === "billing" && <section id="billing" className="content-section">

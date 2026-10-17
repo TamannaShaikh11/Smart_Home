@@ -70,19 +70,19 @@ bool Database::initializeSchema()
             ? sqlite3_column_int(versionStatement, 0)
             : -1;
     sqlite3_finalize(versionStatement);
-    if (schemaVersion < 0 || schemaVersion > 1)
+    if (schemaVersion < 0 || schemaVersion > 2)
     {
         std::cerr << "Unsupported database schema version: "
                   << schemaVersion << '\n';
         return false;
     }
-    if (schemaVersion == 0)
+    if (schemaVersion < 2)
     {
         const std::time_t createdAt = std::time(nullptr);
         std::string backupPath;
         for (int suffix = 0; suffix < 100; ++suffix)
         {
-            backupPath = filename + ".pre-v1-" +
+            backupPath = filename + ".pre-v2-" +
                          std::to_string(createdAt) + "-" +
                          std::to_string(suffix) + ".bak";
             std::ifstream existingBackup(backupPath, std::ios::binary);
@@ -99,7 +99,7 @@ bool Database::initializeSchema()
         sqlite3 *backupDatabase = nullptr;
         if (sqlite3_open(backupPath.c_str(), &backupDatabase) != SQLITE_OK)
         {
-            std::cerr << "Could not create pre-migration database backup: "
+            std::cerr << "Could not create pre-v2 migration backup: "
                       << (backupDatabase != nullptr
                               ? sqlite3_errmsg(backupDatabase)
                               : "unknown SQLite error")
@@ -113,7 +113,7 @@ bool Database::initializeSchema()
             backupDatabase, "main", db, "main");
         if (backup == nullptr)
         {
-            std::cerr << "Could not initialize pre-migration backup: "
+            std::cerr << "Could not initialize pre-v2 migration backup: "
                       << sqlite3_errmsg(backupDatabase) << '\n';
             sqlite3_close(backupDatabase);
             return false;
@@ -125,7 +125,7 @@ bool Database::initializeSchema()
         const int closeResult = sqlite3_close(backupDatabase);
         if (!backupSucceeded || closeResult != SQLITE_OK)
         {
-            std::cerr << "Could not complete pre-migration database backup.\n";
+            std::cerr << "Could not complete pre-v2 database backup.\n";
             return false;
         }
     }
@@ -229,7 +229,42 @@ bool Database::initializeSchema()
     }
 
     if (migrationSucceeded)
-        migrationSucceeded = execute("PRAGMA user_version = 1;");
+        migrationSucceeded = execute(R"(
+            CREATE TABLE IF NOT EXISTS automation_enrollments (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                profile_name TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (profile_id)
+                    REFERENCES user_profiles(id)
+                    ON DELETE CASCADE
+            );
+        )");
+    if (migrationSucceeded)
+        migrationSucceeded = execute(R"(
+            CREATE TABLE IF NOT EXISTS automation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_name TEXT NOT NULL,
+                profile_id TEXT NOT NULL DEFAULT '',
+                event_time INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                settings_changed TEXT NOT NULL DEFAULT '[]'
+            );
+        )");
+    if (migrationSucceeded)
+        migrationSucceeded = execute(R"(
+            CREATE TABLE IF NOT EXISTS automation_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0
+                    CHECK (enabled IN (0, 1))
+            );
+        )");
+    if (migrationSucceeded)
+        migrationSucceeded = execute(
+            "CREATE INDEX IF NOT EXISTS idx_automation_events_time "
+            "ON automation_events(event_time DESC);");
+    if (migrationSucceeded)
+        migrationSucceeded = execute("PRAGMA user_version = 2;");
     if (migrationSucceeded)
         migrationSucceeded = execute("COMMIT;");
     else
@@ -838,4 +873,254 @@ bool Database::loadPreferences(
     sqlite3_finalize(stmt);
 
     return result == SQLITE_ROW;
+}
+
+bool Database::addAutomationEnrollment(
+    const AutomationEnrollmentRecord &enrollment)
+{
+    const char *sql = R"(
+        INSERT INTO automation_enrollments (
+            id, profile_id, profile_name, created_at
+        ) VALUES (?, ?, ?, ?);
+    )";
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare automation enrollment failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, enrollment.id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, enrollment.profileId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, enrollment.profileName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 4, enrollment.createdAt);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save automation enrollment failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return true;
+}
+
+std::vector<AutomationEnrollmentRecord>
+Database::loadAutomationEnrollments() const
+{
+    std::vector<AutomationEnrollmentRecord> enrollments;
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, profile_id, profile_name, created_at
+        FROM automation_enrollments
+        ORDER BY created_at, id;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load automation enrollments failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return enrollments;
+    }
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        enrollments.push_back({
+            text(0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3)});
+    }
+    sqlite3_finalize(statement);
+    return enrollments;
+}
+
+bool Database::loadAutomationEnrollment(
+    const std::string &id,
+    AutomationEnrollmentRecord &enrollment) const
+{
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, profile_id, profile_name, created_at
+        FROM automation_enrollments
+        WHERE id = ?;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare automation enrollment lookup failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement);
+    if (result == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        enrollment = {
+            text(0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3)};
+    }
+    else if (result != SQLITE_DONE)
+    {
+        std::cerr << "Automation enrollment lookup failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    }
+    sqlite3_finalize(statement);
+    return result == SQLITE_ROW;
+}
+
+bool Database::deleteAutomationEnrollment(const std::string &id)
+{
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(
+            db, "DELETE FROM automation_enrollments WHERE id = ?;",
+            -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare automation enrollment delete failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Delete automation enrollment failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return sqlite3_changes(db) > 0;
+}
+
+bool Database::addAutomationEvent(const AutomationEventRecord &event)
+{
+    const char *sql = R"(
+        INSERT INTO automation_events (
+            room_name, profile_id, event_time, outcome, settings_changed
+        ) VALUES (?, ?, ?, ?, ?);
+    )";
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare automation event failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, event.roomName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, event.profileId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement, 3, event.eventTime);
+    sqlite3_bind_text(statement, 4, event.outcome.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 5, event.settingsChanged.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save automation event failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return true;
+}
+
+std::vector<AutomationEventRecord> Database::loadAutomationEvents(
+    int limit) const
+{
+    std::vector<AutomationEventRecord> events;
+    if (limit < 1 || limit > 500)
+        return events;
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, room_name, profile_id, event_time, outcome, settings_changed
+        FROM automation_events
+        ORDER BY event_time DESC, id DESC
+        LIMIT ?;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load automation events failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return events;
+    }
+    sqlite3_bind_int(statement, 1, limit);
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        events.push_back({
+            sqlite3_column_int64(statement, 0),
+            text(1),
+            text(2),
+            sqlite3_column_int64(statement, 3),
+            text(4),
+            text(5)});
+    }
+    sqlite3_finalize(statement);
+    return events;
+}
+
+bool Database::getAutomationEnabled() const
+{
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(
+            db, "SELECT enabled FROM automation_settings WHERE id = 1;",
+            -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load automation setting failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    const int result = sqlite3_step(statement);
+    const bool enabled =
+        result == SQLITE_ROW && sqlite3_column_int(statement, 0) == 1;
+    if (result != SQLITE_ROW && result != SQLITE_DONE)
+    {
+        std::cerr << "Read automation setting failed: "
+                  << sqlite3_errmsg(db) << '\n';
+    }
+    sqlite3_finalize(statement);
+    return enabled;
+}
+
+bool Database::setAutomationEnabled(bool enabled)
+{
+    const char *sql = R"(
+        INSERT INTO automation_settings (id, enabled)
+        VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled;
+    )";
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Prepare automation setting failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_int(statement, 1, enabled ? 1 : 0);
+    const int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        std::cerr << "Save automation setting failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    return true;
 }

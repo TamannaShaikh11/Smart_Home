@@ -405,11 +405,21 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.assertTrue({
             "light_type", "brightness", "color", "color_temperature"
         }.issubset(columns))
-        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 2)
+        automation_tables = {
+            row[0] for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        self.assertTrue({
+            "automation_enrollments",
+            "automation_events",
+            "automation_settings",
+        }.issubset(automation_tables))
         database.close()
         self.assertEqual(original_device_count, self.baseline_device_count)
 
-        backups = list(self.database_dir.glob("smarthome.db.pre-v1-*.bak"))
+        backups = list(self.database_dir.glob("smarthome.db.pre-v2-*.bak"))
         self.assertEqual(len(backups), 1)
         backup_db = sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True)
         self.assertEqual(
@@ -419,7 +429,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         backup_columns = {
             row[1] for row in backup_db.execute("PRAGMA table_info(devices)")
         }
-        self.assertNotIn("light_type", backup_columns)
+        self.assertIn("light_type", backup_columns)
+        self.assertEqual(
+            backup_db.execute("PRAGMA user_version").fetchone()[0],
+            1,
+        )
         self.assertEqual(
             backup_db.execute("SELECT COUNT(*) FROM devices").fetchone()[0],
             self.baseline_device_count,
@@ -693,6 +707,313 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             original_device_count + 6,
         )
         database.close()
+
+    def test_room_scoped_camera_automation_and_confirmed_apply(self):
+        suffix = uuid.uuid4().hex[:10]
+        room = f"Automation Test {suffix}"
+        other_room = f"Other Automation Test {suffix}"
+        profile_id = f"automation_profile_{suffix}"
+        empty_profile_id = f"automation_empty_{suffix}"
+
+        _, initial_status = self.request(
+            "GET", "/api/automation/status"
+        )
+        self.assertFalse(initial_status["enabled"])
+        self.assertIsNone(initial_status["activeSession"])
+        self.request("POST", "/api/rooms", {"name": room}, expected=201)
+        self.request(
+            "POST",
+            "/api/rooms",
+            {"name": other_room},
+            expected=201,
+        )
+        self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": room},
+            expected=403,
+        )
+        self.request(
+            "PUT",
+            "/api/automation/settings",
+            {"enabled": True},
+        )
+        self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": f"missing_{suffix}"},
+            expected=404,
+        )
+        self.request(
+            "POST",
+            "/api/profiles",
+            {"id": profile_id, "displayName": "Automation Member"},
+            expected=201,
+        )
+        self.request(
+            "POST",
+            "/api/profiles",
+            {"id": empty_profile_id, "displayName": "No Preferences"},
+            expected=201,
+        )
+        self.request(
+            "POST",
+            "/api/devices",
+            {
+                "id": f"AUTO_AC_{suffix}",
+                "name": "Automation AC",
+                "type": "AC",
+                "roomName": room,
+                "powerWatts": 900,
+                "temporary": False,
+                "setting": 22,
+            },
+            expected=201,
+        )
+        self.request(
+            "POST",
+            "/api/devices",
+            {
+                "id": f"AUTO_FAN_{suffix}",
+                "name": "Automation Fan",
+                "type": "Fan",
+                "roomName": room,
+                "powerWatts": 60,
+                "temporary": False,
+                "setting": 2,
+            },
+            expected=201,
+        )
+        self.request(
+            "POST",
+            "/api/devices",
+            {
+                "id": f"AUTO_LIGHT_{suffix}",
+                "name": "Automation Light",
+                "type": "Light",
+                "roomName": room,
+                "powerWatts": 45,
+                "temporary": False,
+                "initialOn": False,
+            },
+            expected=201,
+        )
+        self.request(
+            "PUT",
+            f"/api/profiles/{profile_id}/preferences",
+            {
+                "roomName": room,
+                "acTemperature": 25,
+                "heaterTemperature": -1,
+                "fanSpeed": 4,
+                "lightOn": 1,
+            },
+        )
+        _, enrollments_before = self.request(
+            "GET", "/api/automation/enrollments"
+        )
+        self.assertEqual(enrollments_before, [])
+        self.request(
+            "POST",
+            "/api/automation/enrollments",
+            {"profileId": profile_id, "consent": False},
+            expected=400,
+        )
+        self.request(
+            "POST",
+            "/api/automation/enrollments",
+            {"profileId": f"missing_{suffix}", "consent": True},
+            expected=404,
+        )
+        _, enrollment = self.request(
+            "POST",
+            "/api/automation/enrollments",
+            {"profileId": profile_id, "consent": True},
+            expected=201,
+        )
+        _, empty_enrollment = self.request(
+            "POST",
+            "/api/automation/enrollments",
+            {"profileId": empty_profile_id, "consent": True},
+            expected=201,
+        )
+        self.assertNotIn("template", enrollment)
+        self.assertEqual(enrollment["profileId"], profile_id)
+
+        _, session = self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": room},
+            expected=201,
+        )
+        session_id = session["sessionId"]
+        self.assertEqual(session["roomName"], room)
+        self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": other_room},
+            expected=409,
+        )
+        _, active = self.request(
+            "GET",
+            f"/api/automation/sessions/{session_id}",
+        )
+        self.assertEqual(active["roomName"], room)
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": other_room, "status": "matched",
+             "enrollmentId": enrollment["id"]},
+            expected=409,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "ambiguous"},
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+            expected=409,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "unknown"},
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+            expected=409,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "matched",
+             "enrollmentId": empty_enrollment["id"]},
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": empty_enrollment["id"]},
+            expected=404,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "matched",
+             "enrollmentId": enrollment["id"]},
+        )
+        _, preview = self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+        )
+        self.assertEqual(preview["profileId"], profile_id)
+        self.assertEqual(preview["roomName"], room)
+        self.assertEqual(
+            {item.get("deviceId") for item in preview["preview"]},
+            {
+                f"AUTO_AC_{suffix}",
+                f"AUTO_FAN_{suffix}",
+                f"AUTO_LIGHT_{suffix}",
+            },
+        )
+        _, repeated_preview = self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/resolve",
+            {"roomName": room, "enrollmentId": enrollment["id"]},
+        )
+        self.assertEqual(repeated_preview["preview"], preview["preview"])
+
+        apply_url = f"/api/profiles/{profile_id}/preferences/apply"
+        self.request(
+            "POST",
+            apply_url,
+            {"roomName": room, "automationSessionId": session_id},
+            expected=400,
+        )
+        _, applied = self.request(
+            "POST",
+            apply_url,
+            {
+                "roomName": room,
+                "automationSessionId": session_id,
+                "confirmed": True,
+            },
+        )
+        self.assertTrue(applied["success"])
+        self.assertTrue(applied["eventPersisted"])
+        self.assertEqual(
+            {item["status"] for item in applied["actions"]},
+            {"applied"},
+        )
+        self.request(
+            "POST",
+            apply_url,
+            {
+                "roomName": room,
+                "automationSessionId": session_id,
+                "confirmed": True,
+            },
+            expected=409,
+        )
+        self.request(
+            "POST",
+            f"/api/automation/sessions/{session_id}/observation",
+            {"roomName": room, "status": "no_person"},
+        )
+        self.request(
+            "POST",
+            apply_url,
+            {
+                "roomName": room,
+                "automationSessionId": session_id,
+                "confirmed": True,
+            },
+            expected=409,
+        )
+        _, events = self.request("GET", "/api/automation/events?limit=10")
+        self.assertIn(
+            "applied",
+            {event["outcome"] for event in events},
+        )
+        self.assertIn(
+            "missing_preferences",
+            {event["outcome"] for event in events},
+        )
+        self.assertTrue(all("settingsChanged" in event for event in events))
+
+        self.request(
+            "DELETE",
+            f"/api/automation/sessions/{session_id}",
+        )
+        self.request(
+            "PUT",
+            "/api/automation/settings",
+            {"enabled": False},
+        )
+        _, persisted_status = self.request(
+            "GET", "/api/automation/status"
+        )
+        self.assertFalse(persisted_status["enabled"])
+        self.assertIsNone(persisted_status["activeSession"])
+        self.request(
+            "POST",
+            "/api/automation/sessions",
+            {"roomName": room},
+            expected=403,
+        )
+        self.request(
+            "DELETE",
+            f"/api/automation/enrollments/{enrollment['id']}",
+        )
+        self.request(
+            "DELETE",
+            f"/api/automation/enrollments/{empty_enrollment['id']}",
+        )
 
 
 if __name__ == "__main__":

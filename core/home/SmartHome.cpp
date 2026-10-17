@@ -1099,3 +1099,79 @@ bool SmartHome::getUserPreferences(
         preferences
     );
 }
+
+bool SmartHome::addAutomationEnrollment(
+    const AutomationEnrollmentRecord &enrollment)
+{
+    if (enrollment.id.empty() ||
+        enrollment.profileId.empty() ||
+        enrollment.profileName.empty() ||
+        enrollment.createdAt <= 0)
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+    if (!database.profileExists(enrollment.profileId))
+        return false;
+    return database.addAutomationEnrollment(enrollment);
+}
+
+std::vector<AutomationEnrollmentRecord>
+SmartHome::getAutomationEnrollments() const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadAutomationEnrollments();
+}
+
+bool SmartHome::getAutomationEnrollment(
+    const std::string &id,
+    AutomationEnrollmentRecord &enrollment) const
+{
+    if (id.empty())
+        return false;
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadAutomationEnrollment(id, enrollment);
+}
+
+bool SmartHome::deleteAutomationEnrollment(const std::string &id)
+{
+    if (id.empty())
+        return false;
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.deleteAutomationEnrollment(id);
+}
+
+bool SmartHome::recordAutomationEvent(
+    const AutomationEventRecord &event)
+{
+    if (event.roomName.empty() ||
+        event.eventTime <= 0 ||
+        event.outcome.empty() ||
+        event.settingsChanged.empty())
+        return false;
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+    if (findRoom(event.roomName) == nullptr ||
+        (!event.profileId.empty() &&
+         !database.profileExists(event.profileId)))
+        return false;
+    return database.addAutomationEvent(event);
+}
+
+std::vector<AutomationEventRecord> SmartHome::getAutomationEvents(
+    int limit) const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.loadAutomationEvents(limit);
+}
+
+bool SmartHome::getAutomationEnabled() const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.getAutomationEnabled();
+}
+
+bool SmartHome::setAutomationEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+    return database.setAutomationEnabled(enabled);
+}

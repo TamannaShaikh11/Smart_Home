@@ -529,14 +529,69 @@ read `.env` files automatically. The integration was tested in no-key fallback
 mode; a real provider request requires the user's provider configuration and
 has not been tested here.
 
-### Camera privacy and limitations
+### Room-scoped manual control and camera automation
 
-The Camera & Occupancy page uses browser `getUserMedia` only after Start camera
-is pressed. The local preview is not recorded, stored, or sent to the backend
-or cloud. Stopping the camera or navigating away releases the stream. The page
-does not include an occupancy detector, so occupancy always remains Unknown;
-the camera device was detected by Windows, but browser permission and live
-capture were not exercised during verification.
+Every selected room offers **Manual Control** and **Camera Automation**.
+Manual device controls remain usable without the Python service or a camera.
+Camera recognition is opt-in: select a room, enable the global automation
+setting, and press **Start Recognition**. Room changes stop the active session
+before returning to manual mode; recognition stopping never powers devices off.
+Recognized preferences are previewed and require an explicit confirmation.
+
+For Windows, install the local face-service dependency and run the service from
+the repository root in a separate terminal:
+
+```powershell
+python -m pip install -r requirements-face.txt
+python face_automation_service.py
+```
+
+The service listens only on `127.0.0.1:8765`. It requires Windows because
+enrollment templates are protected using the current account's DPAPI and stored
+under `%LOCALAPPDATA%\SmartHomeOS\face_templates.dpapi`. `SMARTHOME_FACE_PORT`
+and `SMARTHOME_FACE_MATCH_THRESHOLD` can override its port and LBPH distance
+threshold; a lower distance is a closer match. The default threshold is 55,
+and three consistent observations are required. Grant camera permission to
+the local Vite page when prompted. Enrollment is available on the Facial
+Recognition Setup page and requires selecting an existing profile and checking
+the explicit consent box. Delete enrollment there to remove its local
+protected template and metadata.
+
+Raw camera frames are processed locally and posted only to the loopback face
+service. The C++ API persists enrollment-to-profile metadata, the global
+enable setting, and automation events, but not frames or biometric templates.
+The relevant API routes are:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/automation/status` | Read global enablement and active room session |
+| `PUT` | `/api/automation/settings` | Persist `{"enabled":true}` or `{"enabled":false}` |
+| `GET`, `POST` | `/api/automation/enrollments` | List or register an existing profile with consent |
+| `DELETE` | `/api/automation/enrollments/{id}` | Delete enrollment metadata |
+| `GET` | `/api/automation/events?limit=5` | Read persisted event summaries |
+| `POST` | `/api/automation/sessions` | Start a room-bound session with `{"roomName":"Bedroom"}` |
+| `GET`, `DELETE` | `/api/automation/sessions/{sessionId}` | Read or stop a session |
+| `POST` | `/api/automation/sessions/{sessionId}/observation` | Send a local recognition observation |
+| `POST` | `/api/automation/sessions/{sessionId}/resolve` | Resolve the accepted enrollment to its profile preferences |
+| `POST` | `/api/profiles/{id}/preferences/apply` | Apply the previewed preferences through the existing C++ device path |
+
+The confirmation request includes `roomName`, `automationSessionId`, and
+`confirmed: true`. The C++ API rechecks the active room, fresh matched identity,
+linked profile, saved preference values, and device capabilities before
+applying. A profile can be applied only once per identity/session; an audit
+event records the room, profile, time, outcome, and changed settings. Unknown,
+pending, or ambiguous recognition never resolves preferences. Multiple faces
+are reported as ambiguous and no identity is selected.
+
+On startup, the additive SQLite version 2 migration creates the automation
+tables without rebuilding or seeding existing data. Before migration, the
+backend creates an online backup named
+`smarthome.db.pre-v2-<timestamp>-<number>.bak`; it stops if the backup fails.
+The local service supports OpenCV Haar detection and LBPH matching, not secure
+authentication or liveness detection. Real camera capture and matching
+accuracy depend on the user's local camera, lighting, and enrollment; neither
+is guaranteed by these tests. Device changes operate the SmartHomeOS simulator,
+not physical appliances.
 
 ### Verification
 
@@ -556,8 +611,8 @@ npm --prefix frontend run build
 ```
 
 The profiles/preferences workflow, confirmed apply action, estimated energy
-analytics, assistant fallback, and privacy-first local camera preview are
-implemented. The configured cloud-provider path is not verified against a live
-provider, occupancy inference is not implemented, and recommendations do not
-yet combine profiles with occupancy. Energy data must not be presented as
-measured usage.
+analytics, assistant fallback, and local face-service unit/API behavior are
+covered by repository tests. A real camera session, real household face-match
+accuracy, liveness detection, and physical device operation have not been
+verified. The configured cloud-provider path is not verified against a live
+provider. Energy data must not be presented as measured usage.

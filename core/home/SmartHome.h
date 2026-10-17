@@ -94,6 +94,20 @@ public:
         const std::string &userId,
         const std::string &roomName,
         UserPreferenceRecord &preferences) const;
+
+    bool addAutomationEnrollment(
+        const AutomationEnrollmentRecord &enrollment);
+    std::vector<AutomationEnrollmentRecord>
+    getAutomationEnrollments() const;
+    bool getAutomationEnrollment(
+        const std::string &id,
+        AutomationEnrollmentRecord &enrollment) const;
+    bool deleteAutomationEnrollment(const std::string &id);
+    bool recordAutomationEvent(const AutomationEventRecord &event);
+    std::vector<AutomationEventRecord> getAutomationEvents(
+        int limit = 50) const;
+    bool getAutomationEnabled() const;
+    bool setAutomationEnabled(bool enabled);
 };
 
 #endif

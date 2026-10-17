@@ -48,6 +48,24 @@ struct UserPreferenceRecord
     int lightOn = -1;
 };
 
+struct AutomationEnrollmentRecord
+{
+    std::string id;
+    std::string profileId;
+    std::string profileName;
+    long long createdAt = 0;
+};
+
+struct AutomationEventRecord
+{
+    long long id = 0;
+    std::string roomName;
+    std::string profileId;
+    long long eventTime = 0;
+    std::string outcome;
+    std::string settingsChanged;
+};
+
 class Database
 {
 private:
@@ -78,6 +96,20 @@ public:
         const std::string &userId,
         const std::string &roomName,
         UserPreferenceRecord &preferences)const;
+
+    bool addAutomationEnrollment(
+        const AutomationEnrollmentRecord &enrollment);
+    std::vector<AutomationEnrollmentRecord>
+    loadAutomationEnrollments() const;
+    bool loadAutomationEnrollment(
+        const std::string &id,
+        AutomationEnrollmentRecord &enrollment) const;
+    bool deleteAutomationEnrollment(const std::string &id);
+    bool addAutomationEvent(const AutomationEventRecord &event);
+    std::vector<AutomationEventRecord> loadAutomationEvents(
+        int limit = 50) const;
+    bool getAutomationEnabled() const;
+    bool setAutomationEnabled(bool enabled);
 
     bool renameRoom(
         const std::string &oldName,

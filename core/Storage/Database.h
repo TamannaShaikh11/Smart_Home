@@ -63,13 +63,13 @@ public:
 
     bool createProfile(const UserProfile &profile);
     bool profileExists(const std::string &userId);
-    std::vector<UserProfile> loadProfiles();
+    std::vector<UserProfile> loadProfiles() const;
 
     bool savePreferences(const UserPreferenceRecord &preferences);
     bool loadPreferences(
         const std::string &userId,
         const std::string &roomName,
-        UserPreferenceRecord &preferences);
+        UserPreferenceRecord &preferences)const;
 
     bool renameRoom(
         const std::string &oldName,

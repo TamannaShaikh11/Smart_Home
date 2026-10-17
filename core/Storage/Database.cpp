@@ -522,7 +522,7 @@ bool Database::profileExists(const std::string& userId)
     return result == SQLITE_ROW;
 }
 
-std::vector<UserProfile> Database::loadProfiles()
+std::vector<UserProfile> Database::loadProfiles() const
 {
     std::vector<UserProfile> profiles;
 
@@ -627,7 +627,7 @@ bool Database::savePreferences(
 bool Database::loadPreferences(
     const std::string& userId,
     const std::string& roomName,
-    UserPreferenceRecord& preferences)
+    UserPreferenceRecord& preferences) const
 {
     const char* sql = R"(
         SELECT ac_temperature, heater_temperature,

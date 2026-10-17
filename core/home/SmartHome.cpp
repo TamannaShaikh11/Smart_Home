@@ -806,3 +806,64 @@ bool SmartHome::deleteRoom(const std::string &roomName)
 
     return true;
 }
+
+bool SmartHome::createUserProfile(const UserProfile& profile)
+{
+    if (profile.id.empty() || profile.displayName.empty())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    return database.createProfile(profile);
+}
+
+
+std::vector<UserProfile> SmartHome::getUserProfiles() const
+{
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    return database.loadProfiles();
+}
+
+
+bool SmartHome::saveUserPreferences(
+    const UserPreferenceRecord& preferences)
+{
+    if (preferences.userId.empty() ||
+        preferences.roomName.empty())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    // Only save preferences for an existing profile.
+    if (!database.profileExists(preferences.userId))
+    {
+        return false;
+    }
+
+    return database.savePreferences(preferences);
+}
+
+
+bool SmartHome::getUserPreferences(
+    const std::string& userId,
+    const std::string& roomName,
+    UserPreferenceRecord& preferences) const
+{
+    if (userId.empty() || roomName.empty())
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(homeMutex);
+
+    return database.loadPreferences(
+        userId,
+        roomName,
+        preferences
+    );
+}

@@ -27,7 +27,7 @@ int main()
 
         // Allow requests from the React/Vite development server.
         server.set_default_headers({{"Access-Control-Allow-Origin", "http://localhost:5173"},
-                                    {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"},
+                                    {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
                                     {"Access-Control-Allow-Headers", "Content-Type"}});
 
         // Handle browser CORS preflight requests.
@@ -600,6 +600,242 @@ int main()
                                "application/json");
                        }
                    });
+
+        // GET /api/profiles
+        // Return all saved user profiles.
+        server.Get("/api/profiles",
+                   [&home](const httplib::Request &,
+                           httplib::Response &res)
+                   {
+                       json result = json::array();
+
+                       for (const UserProfile &profile :
+                            home.getUserProfiles())
+                       {
+                           result.push_back({{"id", profile.id},
+                                             {"displayName", profile.displayName}});
+                       }
+
+                       res.set_content(
+                           result.dump(),
+                           "application/json");
+                   });
+
+        // POST /api/profiles
+        // Request: {"id":"user_001","displayName":"Tamanna"}
+        server.Post("/api/profiles",
+                    [&home](const httplib::Request &req,
+                            httplib::Response &res)
+                    {
+                        try
+                        {
+                            const json body = json::parse(req.body);
+
+                            if (!body.contains("id") ||
+                                !body["id"].is_string() ||
+                                !body.contains("displayName") ||
+                                !body["displayName"].is_string())
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"id and displayName are required strings."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            UserProfile profile;
+                            profile.id = body["id"].get<std::string>();
+                            profile.displayName =
+                                body["displayName"].get<std::string>();
+
+                            auto isBlank = [](const std::string &value)
+                            {
+                                return value.find_first_not_of(
+                                           " \t\n\r") == std::string::npos;
+                            };
+
+                            if (isBlank(profile.id) ||
+                                isBlank(profile.displayName))
+                            {
+                                res.status = 400;
+                                res.set_content(
+                                    R"({"error":"Profile ID and display name cannot be empty."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            if (!home.createUserProfile(profile))
+                            {
+                                res.status = 409;
+                                res.set_content(
+                                    R"({"error":"Profile already exists or could not be created."})",
+                                    "application/json");
+                                return;
+                            }
+
+                            res.status = 201;
+                            res.set_content(
+                                json({{"message", "Profile created successfully."},
+                                      {"id", profile.id},
+                                      {"displayName", profile.displayName}})
+                                    .dump(),
+                                "application/json");
+                        }
+                        catch (const json::exception &error)
+                        {
+                            res.status = 400;
+                            res.set_content(
+                                json({{"error", error.what()}}).dump(),
+                                "application/json");
+                        }
+                    });
+
+        // GET /api/profiles/{id}/preferences?roomName=Bedroom
+        server.Get(
+            R"(/api/profiles/([^/]+)/preferences)",
+            [&home](const httplib::Request &req,
+                    httplib::Response &res)
+            {
+                const std::string userId = req.matches[1].str();
+
+                if (!req.has_param("roomName"))
+                {
+                    res.status = 400;
+                    res.set_content(
+                        R"({"error":"roomName query parameter is required."})",
+                        "application/json");
+                    return;
+                }
+
+                const std::string roomName =
+                    req.get_param_value("roomName");
+
+                UserPreferenceRecord preferences;
+
+                if (!home.getUserPreferences(
+                        userId, roomName, preferences))
+                {
+                    res.status = 404;
+                    res.set_content(
+                        R"({"error":"No saved preferences found for this profile and room."})",
+                        "application/json");
+                    return;
+                }
+
+                res.set_content(
+                    json({{"userId", preferences.userId},
+                          {"roomName", preferences.roomName},
+                          {"acTemperature", preferences.acTemperature},
+                          {"heaterTemperature", preferences.heaterTemperature},
+                          {"fanSpeed", preferences.fanSpeed},
+                          {"lightOn", preferences.lightOn}})
+                        .dump(),
+                    "application/json");
+            });
+
+        // PUT /api/profiles/{id}/preferences
+        // Request:
+        // {
+        //   "roomName": "Bedroom",
+        //   "acTemperature": 24,
+        //   "heaterTemperature": 22,
+        //   "fanSpeed": 3,
+        //   "lightOn": 1
+        // }
+        server.Put(
+            R"(/api/profiles/([^/]+)/preferences)",
+            [&home](const httplib::Request &req,
+                    httplib::Response &res)
+            {
+                try
+                {
+                    const std::string userId =
+                        req.matches[1].str();
+
+                    const json body = json::parse(req.body);
+
+                    if (!body.contains("roomName") ||
+                        !body["roomName"].is_string())
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"roomName is required."})",
+                            "application/json");
+                        return;
+                    }
+
+                    UserPreferenceRecord preferences;
+                    preferences.userId = userId;
+                    preferences.roomName =
+                        body["roomName"].get<std::string>();
+
+                    auto readInteger = [&body](
+                                           const char *key, int &target) -> bool
+                    {
+                        if (!body.contains(key))
+                            return true;
+
+                        if (!body[key].is_number_integer())
+                            return false;
+
+                        target = body[key].get<int>();
+                        return true;
+                    };
+
+                    if (!readInteger("acTemperature",
+                                     preferences.acTemperature) ||
+                        !readInteger("heaterTemperature",
+                                     preferences.heaterTemperature) ||
+                        !readInteger("fanSpeed",
+                                     preferences.fanSpeed) ||
+                        !readInteger("lightOn",
+                                     preferences.lightOn))
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"Preference values must be integers."})",
+                            "application/json");
+                        return;
+                    }
+
+                    if (preferences.roomName.empty() ||
+                        preferences.acTemperature < -1 ||
+                        preferences.heaterTemperature < -1 ||
+                        preferences.fanSpeed < -1 ||
+                        preferences.lightOn < -1 ||
+                        preferences.lightOn > 1)
+                    {
+                        res.status = 400;
+                        res.set_content(
+                            R"({"error":"Invalid preference values."})",
+                            "application/json");
+                        return;
+                    }
+
+                    if (!home.saveUserPreferences(preferences))
+                    {
+                        res.status = 404;
+                        res.set_content(
+                            R"({"error":"Profile not found or preferences could not be saved."})",
+                            "application/json");
+                        return;
+                    }
+
+                    res.set_content(
+                        json({{"message", "Preferences saved successfully."},
+                              {"userId", preferences.userId},
+                              {"roomName", preferences.roomName}})
+                            .dump(),
+                        "application/json");
+                }
+                catch (const json::exception &error)
+                {
+                    res.status = 400;
+                    res.set_content(
+                        json({{"error", error.what()}}).dump(),
+                        "application/json");
+                }
+            });
 
         std::cout << "\nSmartHomeOS API is starting...\n";
         std::cout << "Rooms: " << home.getRoomCount() << '\n';

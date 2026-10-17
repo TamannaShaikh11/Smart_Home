@@ -125,6 +125,52 @@ function App() {
     return response.json();
   };
 
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      const data = await fetchJson(`${API_URL}/profiles`);
+      const list = Array.isArray(data) ? data : [];
+
+      setProfiles(list);
+      setProfileMessage("");
+    } catch (err) {
+      setProfileMessage(`Could not load profiles: ${err.message}`);
+    }
+  }, []);
+
+  const createProfile = async (event) => {
+    event.preventDefault();
+
+    const displayName = profileNameInput.trim();
+
+    if (!displayName) {
+      setProfileMessage("Enter a profile name.");
+      return;
+    }
+
+    setProfileBusy(true);
+    setProfileMessage("");
+
+    try {
+      const id = `user_${Date.now()}`;
+
+      await fetchJson(`${API_URL}/profiles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, displayName }),
+      });
+
+      setProfileNameInput("");
+      await loadProfiles();
+      setSelectedProfileId(id);
+      setProfileMessage(`Profile "${displayName}" created successfully.`);
+    } catch (err) {
+      setProfileMessage(`Could not create profile: ${err.message}`);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
   const loadDashboard = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
 
@@ -145,6 +191,21 @@ function App() {
       setLoading(false);
     }
   }, []);
+
+
+  const [profiles, setProfiles] = useState([]);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [profileNameInput, setProfileNameInput] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileMessage, setProfileMessage] = useState("");
+
+  const [preferenceRoom, setPreferenceRoom] = useState("");
+  const [preferences, setPreferences] = useState({
+    acTemperature: -1,
+    heaterTemperature: -1,
+    fanSpeed: -1,
+    lightOn: -1,
+  });
 
 
   const getApiError = async (response) => {
@@ -274,6 +335,7 @@ function App() {
   useEffect(() => {
     loadDashboard(true);
     loadEnergySessions();
+    loadProfiles();
 
     const interval = setInterval(() => {
       loadDashboard(false);
@@ -281,7 +343,7 @@ function App() {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [loadDashboard, loadEnergySessions]);
+  }, [loadDashboard, loadEnergySessions, loadProfiles]);
 
   const isDeviceOn = (device) => {
     const state = device.state ?? device.status ?? device.isOn;
@@ -689,30 +751,72 @@ function App() {
             <span className="live-pill"><i /> LIVE DASHBOARD</span>
             <button className="icon-button" aria-label="Refresh dashboard" title="Refresh dashboard" onClick={() => { loadDashboard(true); loadEnergySessions(); }}>↻</button>
             <div className="avatar">S</div>
+
+            <label className="profile-selector">
+              <span>👤 User</span>
+              <select
+                value={selectedProfileId}
+                onChange={(event) => setSelectedProfileId(event.target.value)}
+              >
+                <option value="">Select profile</option>
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
+
           </div>
         </header>
 
         {activeSection === "overview" && <>
-        <section id="overview" className="welcome-row">
-          <div>
-            <p className="eyebrow">YOUR HOME AT A GLANCE</p>
-            <h1>Welcome home<span>.</span></h1>
-            <p className="subtitle">Control your space, monitor energy, and make everyday living simpler.</p>
-          </div>
-          <div className="welcome-actions">
-            <div className="date-card"><span>◷</span><div><strong>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short" })}</strong><p>SmartHomeOS dashboard</p></div></div>
-            <button className="primary-button" onClick={() => { setShowDeviceForm(true); goTo("devices"); }}>＋ Add device</button>
-          </div>
-        </section>
+          <section id="overview" className="welcome-row">
+            <div>
+              <p className="eyebrow">YOUR HOME AT A GLANCE</p>
+              <h1>Welcome home<span>.</span></h1>
+              <p className="subtitle">Control your space, monitor energy, and make everyday living simpler.</p>
+            </div>
+            <div className="welcome-actions">
+              <div className="date-card"><span>◷</span><div><strong>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short" })}</strong><p>SmartHomeOS dashboard</p></div></div>
+              <button className="primary-button" onClick={() => { setShowDeviceForm(true); goTo("devices"); }}>＋ Add device</button>
+            </div>
+          </section>
 
-        {error && <div className="alert alert-error" role="alert"><span>⚠</span><div><strong>Connection notice</strong><p>{error}</p></div><button onClick={() => setError("")} aria-label="Dismiss error">×</button></div>}
+          {error && <div className="alert alert-error" role="alert"><span>⚠</span><div><strong>Connection notice</strong><p>{error}</p></div><button onClick={() => setError("")} aria-label="Dismiss error">×</button></div>}
 
-        <section className="stats-grid" aria-label="Home statistics">
-          {stat("Total devices", devices.length, "Registered across your home", "⌁", "purple")}
-          {stat("Devices online", `${activeDevices}/${devices.length}`, "Currently switched on", "ϟ", "green")}
-          {stat("Active power", <>{(totalPowerWatts / 1000).toFixed(2)} <small>kW</small></>, `${totalPowerWatts.toLocaleString("en-IN")} watts in use`, "ϟ", "amber")}
-          {stat("Rooms", rooms.length, "Configured spaces", "⌂", "blue")}
-        </section>
+
+          <form className="inline-create panel" onSubmit={createProfile}>
+            <label className="grow-field">
+              Create user profile
+              <input
+                value={profileNameInput}
+                onChange={(event) => setProfileNameInput(event.target.value)}
+                placeholder="Enter a name"
+                maxLength={80}
+                required
+              />
+            </label>
+
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={profileBusy}
+            >
+              {profileBusy ? "Creating…" : "＋ Create profile"}
+            </button>
+
+            {profileMessage && (
+              <p role="status">{profileMessage}</p>
+            )}
+          </form>
+
+          <section className="stats-grid" aria-label="Home statistics">
+            {stat("Total devices", devices.length, "Registered across your home", "⌁", "purple")}
+            {stat("Devices online", `${activeDevices}/${devices.length}`, "Currently switched on", "ϟ", "green")}
+            {stat("Active power", <>{(totalPowerWatts / 1000).toFixed(2)} <small>kW</small></>, `${totalPowerWatts.toLocaleString("en-IN")} watts in use`, "ϟ", "amber")}
+            {stat("Rooms", rooms.length, "Configured spaces", "⌂", "blue")}
+          </section>
 
         </>}
 
@@ -796,14 +900,14 @@ function App() {
 
         {activeSection === "billing" && <section id="billing" className="content-section">
           <div className="section-heading"><div><p className="eyebrow">COST PLANNING</p><h2>Electricity bill estimator</h2><p className="section-subtitle">An editable, illustrative slab-based estimate — not an official utility bill.</p></div><button className="secondary-button" onClick={() => setShowTariffSettings((v) => !v)}>{showTariffSettings ? "Hide tariff settings" : "⚙ Edit tariff"}</button></div>
-          {showTariffSettings && <form className="panel tariff-form" onSubmit={saveTariffSettings}><div className="form-grid">{[["slab1","First 100 units (₹/unit)"],["slab2","101–300 units (₹/unit)"],["slab3","301–500 units (₹/unit)"],["slab4","Above 500 units (₹/unit)"],["wheeling","Wheeling charge (₹/unit)"],["fixedCharge","Fixed charge (₹/period)"],["dutyPercent","Electricity duty (%)"]].map(([key,label]) => <label key={key}>{label}<input type="number" min="0" step="0.01" value={tariffInputs[key]} onChange={(e) => handleTariffInput(key,e.target.value)} required /></label>)}</div><div className="form-actions"><button type="button" className="secondary-button" onClick={resetTariff}>Reset defaults</button><button className="primary-button">Apply rates</button></div><p className="fine-print">Tariff values are held in React state and reset on page reload. Verify the assumptions for your consumer category.</p></form>}
-          <div className="billing-layout"><div className="bill-total-card"><p>ESTIMATED TOTAL</p><strong>₹{bill.total.toFixed(2)}</strong><span>Based on {bill.units.toFixed(4)} recorded units</span><div className="bill-total-foot"><span>Energy charges</span><strong>₹{bill.energyCharge.toFixed(2)}</strong></div></div><div className="panel bill-breakdown"><h3>Charge breakdown</h3>{[["First 100 units",bill.first*tariff.slab1],["101–300 units",bill.second*tariff.slab2],["301–500 units",bill.third*tariff.slab3],["Above 500 units",bill.fourth*tariff.slab4],["Wheeling charges",bill.wheelingCharge],["Fixed charge",bill.fixedCharge],["Electricity duty",bill.duty]].map(([label,value]) => <div className="bill-row" key={label}><span>{label}</span><strong>₹{Number(value).toFixed(2)}</strong></div>)}<div className="bill-row bill-row-total"><span>Estimated total</span><strong>₹{bill.total.toFixed(2)}</strong></div></div></div>
+          {showTariffSettings && <form className="panel tariff-form" onSubmit={saveTariffSettings}><div className="form-grid">{[["slab1", "First 100 units (₹/unit)"], ["slab2", "101–300 units (₹/unit)"], ["slab3", "301–500 units (₹/unit)"], ["slab4", "Above 500 units (₹/unit)"], ["wheeling", "Wheeling charge (₹/unit)"], ["fixedCharge", "Fixed charge (₹/period)"], ["dutyPercent", "Electricity duty (%)"]].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" step="0.01" value={tariffInputs[key]} onChange={(e) => handleTariffInput(key, e.target.value)} required /></label>)}</div><div className="form-actions"><button type="button" className="secondary-button" onClick={resetTariff}>Reset defaults</button><button className="primary-button">Apply rates</button></div><p className="fine-print">Tariff values are held in React state and reset on page reload. Verify the assumptions for your consumer category.</p></form>}
+          <div className="billing-layout"><div className="bill-total-card"><p>ESTIMATED TOTAL</p><strong>₹{bill.total.toFixed(2)}</strong><span>Based on {bill.units.toFixed(4)} recorded units</span><div className="bill-total-foot"><span>Energy charges</span><strong>₹{bill.energyCharge.toFixed(2)}</strong></div></div><div className="panel bill-breakdown"><h3>Charge breakdown</h3>{[["First 100 units", bill.first * tariff.slab1], ["101–300 units", bill.second * tariff.slab2], ["301–500 units", bill.third * tariff.slab3], ["Above 500 units", bill.fourth * tariff.slab4], ["Wheeling charges", bill.wheelingCharge], ["Fixed charge", bill.fixedCharge], ["Electricity duty", bill.duty]].map(([label, value]) => <div className="bill-row" key={label}><span>{label}</span><strong>₹{Number(value).toFixed(2)}</strong></div>)}<div className="bill-row bill-row-total"><span>Estimated total</span><strong>₹{bill.total.toFixed(2)}</strong></div></div></div>
           <p className="fine-print">The default slab rates, fixed charge and duty are assumptions for demonstration. This estimate does not apply a calendar billing-period filter and may omit charges or adjustments on an actual bill.</p>
         </section>}
 
         {activeSection === "history" && <section id="history" className="content-section">
           <div className="section-heading"><div><p className="eyebrow">ACTIVITY LOG</p><h2>Energy session history</h2><p className="section-subtitle">A record of device activity reported by the backend.</p></div><span className="count-chip">{sessions.length} records</span></div>
-          {energyLoading ? <div className="panel">Loading energy history…</div> : sessions.length === 0 ? <div className="empty-state"><span>◷</span><h3>No sessions yet</h3><p>Turn on a device to begin tracking its estimated energy use.</p></div> : <div className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>Device</th><th>Room</th><th>Power</th><th>Duration</th><th>Energy</th><th>Status</th><th>Started</th></tr></thead><tbody>{[...sessions].sort((a,b) => Number(b.startedAt || 0)-Number(a.startedAt || 0)).map((session,index) => { const active = session.active || Number(session.endedAt) === 0; const duration = active ? Math.max(0,Math.floor(Date.now()/1000)-Number(session.startedAt || 0)) : Math.max(0,Number(session.endedAt || 0)-Number(session.startedAt || 0)); return <tr key={session.id ?? `${session.deviceId}-${index}`}><td><strong>{session.deviceName ?? "Unknown device"}</strong></td><td>{session.roomName ?? "—"}</td><td>{Number(session.powerWatts || 0)} W</td><td>{formatDuration(duration)}</td><td>{Number(session.energyKwh || 0).toFixed(5)} kWh</td><td><span className={`status-tag ${active ? "status-on" : "status-off"}`}>{active ? "ACTIVE" : "COMPLETED"}</span></td><td>{formatDate(Number(session.startedAt || 0))}</td></tr>; })}</tbody></table></div></div>}
+          {energyLoading ? <div className="panel">Loading energy history…</div> : sessions.length === 0 ? <div className="empty-state"><span>◷</span><h3>No sessions yet</h3><p>Turn on a device to begin tracking its estimated energy use.</p></div> : <div className="panel table-panel"><div className="table-wrap"><table><thead><tr><th>Device</th><th>Room</th><th>Power</th><th>Duration</th><th>Energy</th><th>Status</th><th>Started</th></tr></thead><tbody>{[...sessions].sort((a, b) => Number(b.startedAt || 0) - Number(a.startedAt || 0)).map((session, index) => { const active = session.active || Number(session.endedAt) === 0; const duration = active ? Math.max(0, Math.floor(Date.now() / 1000) - Number(session.startedAt || 0)) : Math.max(0, Number(session.endedAt || 0) - Number(session.startedAt || 0)); return <tr key={session.id ?? `${session.deviceId}-${index}`}><td><strong>{session.deviceName ?? "Unknown device"}</strong></td><td>{session.roomName ?? "—"}</td><td>{Number(session.powerWatts || 0)} W</td><td>{formatDuration(duration)}</td><td>{Number(session.energyKwh || 0).toFixed(5)} kWh</td><td><span className={`status-tag ${active ? "status-on" : "status-off"}`}>{active ? "ACTIVE" : "COMPLETED"}</span></td><td>{formatDate(Number(session.startedAt || 0))}</td></tr>; })}</tbody></table></div></div>}
         </section>}
 
         <footer className="footer"><span>SmartHomeOS <span className="footer-dot">●</span> Built for smarter everyday living</span><span>Energy readings are software estimates · Local API</span></footer>

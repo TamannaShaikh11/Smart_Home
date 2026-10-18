@@ -290,7 +290,28 @@ function App() {
     }
 
     try {
-      await fetchFaceJson("/health");
+      const [health, linkedEnrollments, localEnrollments] = await Promise.all([
+        fetchFaceJson("/health"),
+        fetchJson(`${API_URL}/automation/enrollments`),
+        fetchFaceJson("/enrollments"),
+      ]);
+      if (!health.modelReady)
+        throw new Error("The local face detection model is not ready.");
+      const linkedIds = linkedEnrollments.map((item) => item.id).sort();
+      const localIds = localEnrollments.map((item) => item.id).sort();
+      if (JSON.stringify(linkedIds) !== JSON.stringify(localIds))
+        throw new Error(
+          "The saved profile enrollments and local face templates do not match. Recognition was stopped to avoid treating an enrolled person as Unknown. Check that the face service runs under the same Windows account, delete the stale enrollment link in Facial Recognition Setup, then re-enroll."
+        );
+      if (linkedIds.length > 0 && health.recognitionReady === false)
+        throw new Error(
+          "The local face templates are listed but the recognition model did not load them. Restart the face service and check its startup error before trying again."
+        );
+      setFaceEnrollmentCount(
+        Number.isInteger(health.enrollmentCount)
+          ? health.enrollmentCount
+          : localEnrollments.length
+      );
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: false,
@@ -433,6 +454,7 @@ function App() {
   const [roomCameraSettingsRoom, setRoomCameraSettingsRoom] = useState("");
   const [roomCameraSettingsBusy, setRoomCameraSettingsBusy] = useState(false);
   const [automationStatus, setAutomationStatus] = useState("checking");
+  const [faceEnrollmentCount, setFaceEnrollmentCount] = useState(null);
   const [automationError, setAutomationError] = useState("");
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationSession, setCameraSession] = useState(null);
@@ -458,6 +480,7 @@ function App() {
     []
   );
   const cameraVideoRef = useRef(null);
+  const enrollmentVideoRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const startCameraRef = useRef(null);
   startCameraRef.current = startCamera;
@@ -535,10 +558,15 @@ function App() {
     let active = true;
     const checkFaceService = async () => {
       try {
-        await fetchFaceJson("/health");
+        const health = await fetchFaceJson("/health");
         if (active) setAutomationStatus("online");
+        if (active && Number.isInteger(health.enrollmentCount))
+          setFaceEnrollmentCount(health.enrollmentCount);
       } catch {
-        if (active) setAutomationStatus("offline");
+        if (active) {
+          setAutomationStatus("offline");
+          setFaceEnrollmentCount(null);
+        }
       }
     };
     void checkFaceService();
@@ -695,8 +723,13 @@ function App() {
     setEnrollmentMessage("Requesting camera access for local enrollment…");
     let stream;
     let createdEnrollmentId = "";
+    let templatePersisted = false;
+    let retainedTemplateCount = null;
+    let enrollmentStage = "face-service";
+    const cleanupIssues = [];
     try {
       await fetchFaceJson("/health");
+      enrollmentStage = "camera";
       stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: false,
@@ -705,16 +738,30 @@ function App() {
       setCameraStream(stream);
       setCameraStatus("enrolling");
 
-      const video = cameraVideoRef.current;
-      if (!video) throw new Error("The local enrollment preview is unavailable.");
+      enrollmentStage = "preview";
+      const video = enrollmentVideoRef.current;
+      if (!video)
+        throw new Error(
+          "The enrollment preview element is not available. Stay on the Face Enrollments page and try again."
+        );
       video.srcObject = stream;
       await video.play();
-      const readyDeadline = Date.now() + 6000;
-      while (video.readyState < 2 && Date.now() < readyDeadline)
+      const readyDeadline = Date.now() + 10000;
+      while (
+        (video.readyState < 2 || video.videoWidth < 1 || video.videoHeight < 1) &&
+        Date.now() < readyDeadline
+      )
         await new Promise((resolve) => setTimeout(resolve, 100));
-      if (video.readyState < 2)
-        throw new Error("Camera did not provide a usable local video frame.");
+      if (
+        video.readyState < 2 ||
+        video.videoWidth < 1 ||
+        video.videoHeight < 1
+      )
+        throw new Error(
+          "The camera opened, but no video frame arrived. Check that another app or browser tab is not using the camera, then retry."
+        );
 
+      enrollmentStage = "capture";
       setEnrollmentMessage("Capturing 10 local samples. Keep one consenting person's face centered.");
       const canvas = document.createElement("canvas");
       const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -735,7 +782,8 @@ function App() {
         body: JSON.stringify({ profileId: profile.id, consent: true }),
       });
       createdEnrollmentId = enrollment.id;
-      await fetchFaceJson(
+      enrollmentStage = "template";
+      const trainingResult = await fetchFaceJson(
         `/enrollments/${encodeURIComponent(enrollment.id)}/train`,
         {
           method: "POST",
@@ -746,24 +794,91 @@ function App() {
           }),
         }
       );
+      const localEnrollments = await fetchFaceJson("/enrollments");
+      const savedEnrollment = localEnrollments.find(
+        (item) => item.id === enrollment.id
+      );
+      if (!savedEnrollment)
+        throw new Error(
+          "The face service did not retain the new template. The enrollment was not completed."
+        );
+      templatePersisted = true;
+      retainedTemplateCount = localEnrollments.length;
+      if (savedEnrollment.sampleCount !== frames.length)
+        throw new Error(
+          `The face service retained ${savedEnrollment.sampleCount ?? "an unknown number of"} of ${frames.length} samples. Keep the service running and check its local template store before retrying.`
+        );
+      if (
+        (trainingResult.enrollmentId !== undefined &&
+          trainingResult.enrollmentId !== enrollment.id) ||
+        (trainingResult.samples !== undefined &&
+          trainingResult.samples !== frames.length) ||
+        trainingResult.recognitionReady === false
+      )
+        throw new Error(
+          "The face service returned inconsistent enrollment details. The saved template was retained; restart the face service and check its health before retrying."
+        );
+      const health = await fetchFaceJson("/health");
+      if (health.recognitionReady !== true)
+        throw new Error(
+          "The template was saved, but the face service has not confirmed that its recognition model is ready. Restart the face service and check its startup log; the template was retained."
+        );
+      setFaceEnrollmentCount(localEnrollments.length);
       await refreshAutomationMetadata();
       setEnrollmentMessage(`Local enrollment linked to ${profile.displayName}. Face samples are encrypted on this Windows account.`);
       setEnrollmentConsent(false);
     } catch (err) {
-      if (createdEnrollmentId) {
+      if (createdEnrollmentId && !templatePersisted) {
+        try {
+          await fetchFaceJson(
+            `/enrollments/${encodeURIComponent(createdEnrollmentId)}`,
+            { method: "DELETE" }
+          );
+        } catch (cleanupError) {
+          if (!cleanupError.message.includes("(404)"))
+            cleanupIssues.push(`local template: ${cleanupError.message}`);
+        }
         try {
           await fetchJson(
             `${API_URL}/automation/enrollments/${encodeURIComponent(createdEnrollmentId)}`,
             { method: "DELETE" }
           );
         } catch (cleanupError) {
-          setEnrollmentMessage(
-            `Enrollment failed: ${err.message}. The profile link cleanup also failed: ${cleanupError.message}`
-          );
+          cleanupIssues.push(`profile link: ${cleanupError.message}`);
         }
       }
-      if (!createdEnrollmentId || !err.message.includes("cleanup also failed"))
-        setEnrollmentMessage(`Enrollment failed: ${err.message}`);
+      if (templatePersisted && Number.isInteger(retainedTemplateCount))
+        setFaceEnrollmentCount(retainedTemplateCount);
+      let detail = err.message;
+      if (err.name === "NotAllowedError" || err.name === "SecurityError")
+        detail = "Camera permission was denied. Allow camera access for http://localhost:5173 in the browser site settings, then retry.";
+      else if (
+        err.name === "NotFoundError" ||
+        err.name === "DevicesNotFoundError"
+      )
+        detail = "No webcam is available to this browser. Connect or enable a camera, then retry.";
+      else if (err.name === "NotReadableError" || err.name === "AbortError")
+        detail = "The webcam could not be opened. Close other apps or browser tabs using it, then retry.";
+      else if (
+        enrollmentStage === "preview" &&
+        err.name === "NotSupportedError"
+      )
+        detail = "The browser could not start the local video preview. Confirm camera permission and that the webcam is available.";
+      else if (
+        ["face-service", "template"].includes(enrollmentStage) &&
+        String(err.message).includes("Failed to fetch")
+      )
+        detail = "The local face service could not be reached. Confirm that Python is running at 127.0.0.1:8765, then retry.";
+      else if (
+        enrollmentStage === "camera" &&
+        String(err.message).includes("Failed to fetch")
+      )
+        detail = "The local face service became unavailable. Restart the Python service and retry.";
+      setEnrollmentMessage(
+        cleanupIssues.length
+          ? `Enrollment failed: ${detail}. Cleanup failed for ${cleanupIssues.join(" and ")}.`
+          : `Enrollment failed: ${detail}${templatePersisted ? " The saved template and profile link were retained; do not enroll this profile again until the service status is resolved." : ""}`
+      );
     } finally {
       stream?.getTracks().forEach((track) => track.stop());
       cameraStreamRef.current = null;
@@ -791,6 +906,8 @@ function App() {
         `${API_URL}/automation/enrollments/${encodeURIComponent(enrollment.id)}`,
         { method: "DELETE" }
       );
+      const localEnrollments = await fetchFaceJson("/enrollments");
+      setFaceEnrollmentCount(localEnrollments.length);
       await refreshAutomationMetadata();
       setEnrollmentMessage(`Enrollment for ${enrollment.profileName} was deleted.`);
     } catch (err) {
@@ -2310,37 +2427,29 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="breadcrumb">Workspace <span>/</span> <strong>{activeSection.charAt(0).toUpperCase() + activeSection.slice(1)}</strong></div>
+          <div className="topbar-copy">
+            <div className="breadcrumb">Workspace <span>/</span> <strong>{activeSection.charAt(0).toUpperCase() + activeSection.slice(1)}</strong></div>
+            {activeSection === "overview" && (
+              <div className="topbar-page-heading">
+                <h1>Dashboard</h1>
+                <p>Your smart home at a glance</p>
+              </div>
+            )}
+          </div>
           <div className="topbar-actions">
-            <span className="live-pill"><i /> LIVE DASHBOARD</span>
+            <span
+              className={`live-pill ${error ? "live-pill-offline" : ""}`}
+              role="status"
+              title={error || "Local API connected"}
+            >
+              <i />{error ? "CONNECTION ISSUE" : "CONNECTED"}
+            </span>
             <button className="icon-button" aria-label="Refresh dashboard" title="Refresh dashboard" onClick={() => { loadDashboard(true); loadEnergySessions(); loadEnergySummary(); }}>↻</button>
-            <div className="avatar">S</div>
-
-            <label className="profile-selector">
-              <span>👤 User</span>
-              <select
-                value={selectedProfileId}
-                onChange={(event) => selectProfile(event.target.value)}
-              >
-                <option value="">Select profile</option>
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.displayName}
-                  </option>
-                ))}
-              </select>
-            </label>
-
           </div>
         </header>
 
         {activeSection === "overview" && <>
           <section id="overview" className="welcome-row">
-            <div>
-              <p className="eyebrow">YOUR HOME AT A GLANCE</p>
-              <h1>Welcome home<span>.</span></h1>
-              <p className="subtitle">Control your space, monitor energy, and make everyday living simpler.</p>
-            </div>
             <div className="welcome-actions">
               <div className="date-card"><span>◷</span><div><strong>{new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "short" })}</strong><p>SmartHomeOS dashboard</p></div></div>
               <button className="primary-button" onClick={() => { setShowDeviceForm(true); goTo("devices"); }}>＋ Add device</button>
@@ -2648,7 +2757,7 @@ function App() {
                     {automationSession
                       ? <button className="secondary-button danger-button" type="button" onClick={() => { void switchToManualControl(); }}>Stop Recognition</button>
                       : <button className="primary-button" type="button" onClick={startCamera} disabled={roomCameraSettingsRoom !== selectedRoom || !automationEnabled || !roomCameraEnabled || cameraStarting || automationStatus !== "online"}>{cameraStarting ? "Starting local service…" : "Start Recognition"}</button>}
-                    <p className="fine-print">Python service: {automationStatus}. Camera frames are processed locally. First application always requires preview and confirmation; later visits auto-apply only when explicitly enabled for this profile and room.</p>
+                    <p className="fine-print">Python service: {automationStatus}{faceEnrollmentCount === null ? "" : ` · ${faceEnrollmentCount} local face template${faceEnrollmentCount === 1 ? "" : "s"}`}. Camera frames are processed locally. Enrollment metadata and templates are checked before recognition starts. First application always requires preview and confirmation; later visits auto-apply only when explicitly enabled for this profile and room.</p>
                   </div>
                 </div>
                 <div className="occupancy-state" aria-live="polite">
@@ -3108,8 +3217,20 @@ function App() {
                 <button type="button" role="switch" aria-checked={automationEnabled} aria-label="Enable global camera automation" className={`toggle ${automationEnabled ? "toggle-on" : ""}`} disabled={automationBusy || Boolean(automationSession)} onClick={() => updateAutomationEnabled(!automationEnabled)}><span /></button>
               </div>
               {cameraStream && !automationSession
-                ? <video className="camera-preview" ref={cameraVideoRef} autoPlay muted playsInline aria-label="Temporary local enrollment camera preview" />
+                ? null
                 : <div className="camera-preview camera-preview-placeholder"><span>◉</span><strong>Enrollment preview is off</strong><small>Press Enroll member to request camera access and capture local samples.</small></div>}
+              <video
+                className="camera-preview"
+                ref={enrollmentVideoRef}
+                autoPlay
+                muted
+                playsInline
+                aria-label="Temporary local enrollment camera preview"
+                style={{
+                  display:
+                    cameraStream && !automationSession ? "block" : "none",
+                }}
+              />
               <form className="device-form enrollment-form" onSubmit={enrollHouseholdMember}>
                 <div className="form-heading"><div><p className="eyebrow">EXPLICIT ENROLLMENT</p><h3>Link a face to an existing profile</h3></div></div>
                 <label>SmartHomeOS profile

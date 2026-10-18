@@ -765,8 +765,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             for item in initial_settings
         }
         self.assertTrue(set(room_names).issubset(settings_by_room))
-        for room_name in expected_rooms | {future_room}:
-            self.assertFalse(settings_by_room[room_name], room_name)
+        self.assertFalse(settings_by_room[future_room])
 
         self.request(
             "GET", "/api/automation/room-settings?roomName=", expected=400

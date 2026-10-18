@@ -573,12 +573,30 @@ the local Vite page when prompted. Enrollment is available on the Facial
 Recognition Setup page and requires selecting an existing profile and checking
 the explicit consent box. Delete enrollment there to remove its local
 protected template and metadata.
+Enrollment preview is the browser's muted `getUserMedia` stream rendered in
+the Face Enrollments page; the Python service intentionally has no webcam
+preview route and does not open or own the physical camera. The page keeps its
+video element mounted before requesting access, then waits for actual video
+dimensions and a decoded frame before capturing samples. Camera permission
+denial, missing devices, devices busy in another app/tab, and an opened camera
+that supplies no frame produce distinct actionable errors.
 The frontend polls the actual local `/health` endpoint; if the Python process
 is not listening, the service is offline rather than assumed healthy. The
 service does not open a webcam itself: the browser owns the camera stream and
 sends frames locally. A single service session can be active at once, so one
 shared webcam cannot monitor multiple rooms simultaneously. The C++ and Python
 session records both bind the active session to its room.
+The service reports its loaded template count and readiness from `GET /health`,
+and logs only that count (never names, images, or face features) at startup.
+`status: online` means the local process and detector are available;
+`recognitionReady: false` with `enrollmentCount: 0` means no enrolled identity
+is loaded, so a known household member cannot yet be matched.
+Start it under the same Windows account used for enrollment: DPAPI protects
+templates for that account, and a different account has a different
+`LOCALAPPDATA` store. Recognition checks that local template IDs match the
+profile enrollment IDs in SQLite before opening the camera. If they differ,
+it refuses recognition and directs the user to re-enroll; it does not report a
+known person as `Unknown` or change devices.
 
 Raw camera frames are processed locally and posted only to the loopback face
 service. The C++ API persists enrollment-to-profile metadata, the global
@@ -614,6 +632,14 @@ applying. A profile can be applied only once per identity/session; an audit
 event records the room, profile, time, outcome, and changed settings. Unknown,
 pending, or ambiguous recognition never resolves preferences. Multiple faces
 are reported as ambiguous and no identity is selected.
+
+Enrollment writes the local template file through a flushed temporary file and
+atomic replacement. At restart the service decrypts and validates each stored
+sample before rebuilding the LBPH recognizer. Missing templates are reported
+as an empty enrollment store; malformed or undecryptable stores fail explicitly
+instead of silently discarding entries. This provides persistence diagnostics,
+not a guarantee of accurate recognition under different camera angles or
+lighting.
 
 On startup, the additive SQLite version 2 migration creates the automation
 tables without rebuilding or seeding existing data. Migration version 4 adds
@@ -744,7 +770,9 @@ npm --prefix frontend run build
 ```
 
 The profiles/preferences workflow, confirmed apply action, estimated energy
-analytics, assistant fallback, and local face-service unit/API behavior are
+analytics, assistant fallback, and local face-service unit/API behavior,
+including encrypted template reload and real LBPH match/unknown-distance
+regression tests, are
 covered by repository tests. A real camera session, real household face-match
 accuracy, liveness detection, and physical device operation have not been
 verified. The configured cloud-provider path is not verified against a live

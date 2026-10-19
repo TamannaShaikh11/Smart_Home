@@ -146,6 +146,40 @@ class FaceAutomationServiceTest(unittest.TestCase):
                 self.assertTrue(store_path.is_file())
                 encrypted_store = store_path.read_bytes()
                 self.assertNotIn(b"Encrypted Persistence Test", encrypted_store)
+                matcher.start_session("persist_session_live", "Study")
+                with patch.object(
+                    matcher,
+                    "_faces",
+                    return_value=[samples[3]],
+                ):
+                    live_results = [
+                        matcher.recognize(
+                            "persist_session_live", "Study", blank_frame
+                        )
+                        for _ in range(3)
+                    ]
+                self.assertEqual(live_results[-1]["status"], "matched")
+                self.assertEqual(
+                    live_results[-1]["enrollmentId"], enrollment_id
+                )
+                self.assertEqual(
+                    live_results[-1]["diagnostics"]["sampleCount"],
+                    len(samples),
+                )
+                self.assertTrue(
+                    live_results[-1]["diagnostics"]["predictedLabelMapped"]
+                )
+                self.assertFalse(
+                    {
+                        "enrollmentId",
+                        "displayName",
+                        "frame",
+                    }
+                    & live_results[-1]["diagnostics"].keys()
+                )
+                self.assertEqual(
+                    live_results[-1]["diagnostics"]["distance"], 0.0
+                )
 
             restarted_matcher = face_service.FaceMatcher()
             self.assertTrue(restarted_matcher.trained)
@@ -162,6 +196,24 @@ class FaceAutomationServiceTest(unittest.TestCase):
             )
             self.assertLessEqual(
                 enrolled_distance, face_service.MATCH_THRESHOLD
+            )
+            genuine_distances = [
+                float(restarted_matcher.recognizer.predict(sample)[1])
+                for sample in samples
+            ]
+            self.assertLessEqual(
+                max(genuine_distances), face_service.MATCH_THRESHOLD
+            )
+            unknown_distances = [
+                float(
+                    restarted_matcher.recognizer.predict(
+                        self.textured_face(seed)
+                    )[1]
+                )
+                for seed in range(999, 1009)
+            ]
+            self.assertGreater(
+                min(unknown_distances), face_service.MATCH_THRESHOLD
             )
 
             with patch.object(face_service, "MATCHER", restarted_matcher):
@@ -191,6 +243,13 @@ class FaceAutomationServiceTest(unittest.TestCase):
                     ["pending", "pending", "matched"],
                 )
                 self.assertEqual(results[-1]["enrollmentId"], enrollment_id)
+                self.assertTrue(
+                    results[-1]["diagnostics"]["predictedLabelMapped"]
+                )
+                self.assertEqual(
+                    results[-1]["diagnostics"]["sampleCount"],
+                    len(samples),
+                )
 
                 unknown = self.textured_face(999)
                 label, distance = restarted_matcher.recognizer.predict(unknown)
@@ -211,6 +270,28 @@ class FaceAutomationServiceTest(unittest.TestCase):
                     [result["status"] for result in unknown_results],
                     ["uncertain", "uncertain", "unknown"],
                 )
+                self.assertEqual(
+                    unknown_results[-1]["reason"],
+                    "distance_above_threshold",
+                )
+                self.assertGreater(
+                    unknown_results[-1]["diagnostics"]["distance"],
+                    face_service.MATCH_THRESHOLD,
+                )
+
+    def test_face_detection_preprocessing_is_grayscale_and_128_square(self):
+        matcher = face_service.MATCHER
+        detector = Mock()
+        detector.detectMultiScale.return_value = [(10, 15, 100, 90)]
+        image = np.zeros((180, 220, 3), dtype=np.uint8)
+        image[15:105, 10:110] = (40, 100, 200)
+
+        with patch.object(matcher, "detector", detector):
+            faces = matcher._faces(image)
+
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(faces[0].shape, face_service.FACE_SIZE)
+        self.assertEqual(faces[0].dtype, np.uint8)
 
     def test_failed_persistence_does_not_report_or_keep_an_enrollment(self):
         matcher = face_service.MATCHER

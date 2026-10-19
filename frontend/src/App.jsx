@@ -2788,6 +2788,14 @@ function App() {
                           ? "Lighting, contrast, or focus is too poor for a reliable observation. Adjust the camera view; no profile or device changes are allowed."
                           : "The match is not reliable enough yet. No profile or device changes are allowed until observations are consistent."
                         : "Face matching is local, probabilistic, and is not liveness detection or secure authentication."}</p>
+                  {recognition.diagnostics && <small className="recognition-diagnostics">
+                    Diagnostic · {recognition.diagnostics.stage}: {recognition.diagnostics.reason}
+                    {" · "}{recognition.diagnostics.detectedFaces ?? 0} detected face(s)
+                    {" · "}{recognition.diagnostics.sampleCount ?? 0} loaded sample(s)
+                    {Number.isFinite(recognition.diagnostics.distance) && Number.isFinite(recognition.diagnostics.threshold)
+                      ? ` · LBPH distance ${recognition.diagnostics.distance} / threshold ${recognition.diagnostics.threshold}`
+                      : ""}
+                  </small>}
                 </div>
                 {recognition.status === "unknown" && <div className="form-actions">
                   <button

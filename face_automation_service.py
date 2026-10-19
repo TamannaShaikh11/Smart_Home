@@ -365,6 +365,8 @@ class FaceMatcher:
                 "unknownCount": 0,
                 "resolved": None,
                 "lastSeen": int(time.time()),
+                "lastDiagnosticAt": 0,
+                "lastDiagnosticStage": None,
             }
             self.active_session = session_id
 
@@ -377,6 +379,28 @@ class FaceMatcher:
                 self.active_session = None
             return True
 
+    @staticmethod
+    def _recognition_result(session, result, diagnostic):
+        result["diagnostics"] = diagnostic
+        signature = (result["status"], diagnostic.get("reason"))
+        now = time.monotonic()
+        if (
+            signature != session["lastDiagnosticStage"]
+            or now - session["lastDiagnosticAt"] >= 30
+        ):
+            log_fields = {
+                "status": result["status"],
+                **diagnostic,
+            }
+            print(
+                "[face-service] recognition diagnostic "
+                + json.dumps(log_fields, separators=(",", ":"), sort_keys=True),
+                flush=True,
+            )
+            session["lastDiagnosticStage"] = signature
+            session["lastDiagnosticAt"] = now
+        return result
+
     def recognize(self, session_id, room_name, encoded_frame):
         image = self._decode_frame(encoded_frame)
         faces = self._faces(image)
@@ -387,28 +411,55 @@ class FaceMatcher:
             if session["roomName"] != room_name:
                 raise PermissionError("Frame room does not match its recognition session.")
             session["lastSeen"] = int(time.time())
+            diagnostic = {
+                "stage": "face_detection",
+                "detectedFaces": len(faces),
+                "preprocessing": "grayscale Haar crop resized to 128x128",
+                "enrollmentCount": len(self.enrollments),
+                "sampleCount": sum(
+                    len(entry["samples"]) for entry in self.enrollments.values()
+                ),
+                "modelTrained": self.trained,
+                "threshold": MATCH_THRESHOLD,
+            }
             if len(faces) > 1:
                 session["candidate"] = None
                 session["count"] = 0
                 session["unknownCount"] = 0
                 session["resolved"] = None
-                return {"status": "ambiguous", "faceCount": len(faces)}
+                diagnostic["reason"] = "multiple_faces"
+                return self._recognition_result(
+                    session,
+                    {"status": "ambiguous", "faceCount": len(faces)},
+                    diagnostic,
+                )
             if not faces:
                 session["candidate"] = None
                 session["count"] = 0
                 session["unknownCount"] = 0
                 session["resolved"] = None
-                return {"status": "no_person", "faceCount": 0}
+                diagnostic["reason"] = "no_face_detected"
+                return self._recognition_result(
+                    session,
+                    {"status": "no_person", "faceCount": 0},
+                    diagnostic,
+                )
             if not self._is_good_quality(faces[0]):
                 session["candidate"] = None
                 session["count"] = 0
                 session["unknownCount"] = 0
                 session["resolved"] = None
-                return {
-                    "status": "uncertain",
-                    "faceCount": 1,
-                    "reason": "poor_quality",
-                }
+                diagnostic["stage"] = "preprocessing"
+                diagnostic["reason"] = "poor_quality"
+                return self._recognition_result(
+                    session,
+                    {
+                        "status": "uncertain",
+                        "faceCount": 1,
+                        "reason": "poor_quality",
+                    },
+                    diagnostic,
+                )
             if not self.trained:
                 session["candidate"] = None
                 session["count"] = 0
@@ -419,15 +470,36 @@ class FaceMatcher:
                     if session["unknownCount"] >= CONSISTENT_MATCHES
                     else "uncertain"
                 )
-                return {
-                    "status": status,
-                    "faceCount": 1,
-                    "observations": session["unknownCount"],
-                    "requiredObservations": CONSISTENT_MATCHES,
-                }
+                diagnostic.update({
+                    "stage": "model",
+                    "reason": "model_untrained",
+                })
+                return self._recognition_result(
+                    session,
+                    {
+                        "status": status,
+                        "faceCount": 1,
+                        "observations": session["unknownCount"],
+                        "requiredObservations": CONSISTENT_MATCHES,
+                        "reason": "model_untrained",
+                    },
+                    diagnostic,
+                )
             label, distance = self.recognizer.predict(faces[0])
-            enrollment_id = self.label_ids.get(label)
+            predicted_label = int(label)
+            enrollment_id = self.label_ids.get(predicted_label)
+            distance = float(distance)
+            diagnostic.update({
+                "stage": "matching",
+                "predictedLabelMapped": enrollment_id is not None,
+                "distance": round(distance, 2),
+            })
             if enrollment_id is None or distance > MATCH_THRESHOLD:
+                reason = (
+                    "label_unmapped"
+                    if enrollment_id is None
+                    else "distance_above_threshold"
+                )
                 session["candidate"] = None
                 session["count"] = 0
                 session["resolved"] = None
@@ -437,12 +509,18 @@ class FaceMatcher:
                     if session["unknownCount"] >= CONSISTENT_MATCHES
                     else "uncertain"
                 )
-                return {
-                    "status": status,
-                    "faceCount": 1,
-                    "observations": session["unknownCount"],
-                    "requiredObservations": CONSISTENT_MATCHES,
-                }
+                diagnostic["reason"] = reason
+                return self._recognition_result(
+                    session,
+                    {
+                        "status": status,
+                        "faceCount": 1,
+                        "observations": session["unknownCount"],
+                        "requiredObservations": CONSISTENT_MATCHES,
+                        "reason": reason,
+                    },
+                    diagnostic,
+                )
             session["unknownCount"] = 0
             if session["candidate"] == enrollment_id:
                 session["count"] += 1
@@ -452,21 +530,31 @@ class FaceMatcher:
                 session["resolved"] = None
             entry = self.enrollments[enrollment_id]
             if session["count"] < CONSISTENT_MATCHES:
-                return {
-                    "status": "pending",
+                diagnostic["reason"] = "consistent_match_pending"
+                return self._recognition_result(
+                    session,
+                    {
+                        "status": "pending",
+                        "faceCount": 1,
+                        "observations": session["count"],
+                        "requiredObservations": CONSISTENT_MATCHES,
+                        "displayName": entry["displayName"],
+                    },
+                    diagnostic,
+                )
+            session["resolved"] = enrollment_id
+            diagnostic["reason"] = "matched"
+            return self._recognition_result(
+                session,
+                {
+                    "status": "matched",
                     "faceCount": 1,
                     "observations": session["count"],
-                    "requiredObservations": CONSISTENT_MATCHES,
+                    "enrollmentId": enrollment_id,
                     "displayName": entry["displayName"],
-                }
-            session["resolved"] = enrollment_id
-            return {
-                "status": "matched",
-                "faceCount": 1,
-                "observations": session["count"],
-                "enrollmentId": enrollment_id,
-                "displayName": entry["displayName"],
-            }
+                },
+                diagnostic,
+            )
 
 
 MATCHER = FaceMatcher()

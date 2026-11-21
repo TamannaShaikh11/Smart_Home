@@ -1642,3 +1642,233 @@ bool Database::updateModeHistoryRestore(
     }
     return true;
 }
+
+std::string Database::loadBillingTariff() const
+{
+    sqlite3_stmt *statement = nullptr;
+    if (sqlite3_prepare_v2(
+            db,
+            "SELECT tariff_json FROM billing_settings WHERE id = 1;",
+            -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load billing tariff failed: " << sqlite3_errmsg(db) << '\n';
+        return {};
+    }
+
+    std::string tariff;
+    if (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        const unsigned char *value = sqlite3_column_text(statement, 0);
+        if (value != nullptr)
+            tariff = reinterpret_cast<const char *>(value);
+    }
+    sqlite3_finalize(statement);
+    return tariff;
+}
+
+bool Database::saveBillingTariff(const std::string &tariffJson)
+{
+    if (!execute("BEGIN IMMEDIATE;"))
+        return false;
+
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        INSERT OR REPLACE INTO billing_settings(id, tariff_json, updated_at)
+        VALUES(1, ?, ?);
+    )";
+    bool succeeded = sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) == SQLITE_OK;
+    if (succeeded)
+    {
+        sqlite3_bind_text(statement, 1, tariffJson.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(
+            statement, 2, static_cast<sqlite3_int64>(std::time(nullptr)));
+        succeeded = sqlite3_step(statement) == SQLITE_DONE;
+    }
+    sqlite3_finalize(statement);
+
+    if (succeeded)
+    {
+        statement = nullptr;
+        succeeded = sqlite3_prepare_v2(
+            db,
+            "UPDATE billing_cycles SET tariff_json = ? WHERE status = 'active';",
+            -1, &statement, nullptr) == SQLITE_OK;
+        if (succeeded)
+        {
+            sqlite3_bind_text(statement, 1, tariffJson.c_str(), -1, SQLITE_TRANSIENT);
+            succeeded = sqlite3_step(statement) == SQLITE_DONE;
+        }
+        sqlite3_finalize(statement);
+    }
+
+    if (succeeded)
+        succeeded = execute("COMMIT;");
+    if (!succeeded)
+    {
+        std::cerr << "Save billing tariff failed: " << sqlite3_errmsg(db) << '\n';
+        execute("ROLLBACK;");
+    }
+    return succeeded;
+}
+
+bool Database::ensureBillingCycle(
+    long long startedAt,
+    const std::string &tariffJson)
+{
+    if (!execute("BEGIN IMMEDIATE;"))
+        return false;
+
+    sqlite3_stmt *statement = nullptr;
+    bool succeeded = sqlite3_prepare_v2(
+        db,
+        "SELECT 1 FROM billing_cycles WHERE status = 'active' LIMIT 1;",
+        -1, &statement, nullptr) == SQLITE_OK;
+    int result = succeeded ? sqlite3_step(statement) : SQLITE_ERROR;
+    sqlite3_finalize(statement);
+
+    if (succeeded && result == SQLITE_DONE)
+    {
+        statement = nullptr;
+        succeeded = sqlite3_prepare_v2(
+            db,
+            "INSERT INTO billing_cycles "
+            "(started_at, ended_at, tariff_json, status, created_at) "
+            "VALUES(?, 0, ?, 'active', ?);",
+            -1, &statement, nullptr) == SQLITE_OK;
+        if (succeeded)
+        {
+            sqlite3_bind_int64(statement, 1, startedAt);
+            sqlite3_bind_text(statement, 2, tariffJson.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(statement, 3, startedAt);
+            succeeded = sqlite3_step(statement) == SQLITE_DONE;
+        }
+        sqlite3_finalize(statement);
+    }
+    else if (succeeded && result != SQLITE_ROW)
+    {
+        succeeded = false;
+    }
+
+    if (succeeded)
+        succeeded = execute("COMMIT;");
+    if (!succeeded)
+    {
+        std::cerr << "Ensure billing cycle failed: " << sqlite3_errmsg(db) << '\n';
+        execute("ROLLBACK;");
+    }
+    return succeeded;
+}
+
+bool Database::startBillingCycle(
+    long long startedAt,
+    long long expectedActiveCycleId)
+{
+    if (!execute("BEGIN IMMEDIATE;"))
+        return false;
+
+    sqlite3_stmt *statement = nullptr;
+    bool succeeded = sqlite3_prepare_v2(
+        db,
+        "SELECT id, started_at, tariff_json FROM billing_cycles "
+        "WHERE status = 'active' LIMIT 1;",
+        -1, &statement, nullptr) == SQLITE_OK;
+    int result = succeeded ? sqlite3_step(statement) : SQLITE_ERROR;
+    sqlite3_int64 activeId = 0;
+    sqlite3_int64 activeStartedAt = 0;
+    std::string activeTariff;
+    if (result == SQLITE_ROW)
+    {
+        activeId = sqlite3_column_int64(statement, 0);
+        activeStartedAt = sqlite3_column_int64(statement, 1);
+        const unsigned char *value = sqlite3_column_text(statement, 2);
+        if (value != nullptr)
+            activeTariff = reinterpret_cast<const char *>(value);
+    }
+    sqlite3_finalize(statement);
+
+    if (!succeeded || result != SQLITE_ROW || activeId != expectedActiveCycleId ||
+        startedAt <= activeStartedAt)
+    {
+        execute("ROLLBACK;");
+        return false;
+    }
+
+    statement = nullptr;
+    succeeded = sqlite3_prepare_v2(
+        db,
+        "UPDATE billing_cycles SET ended_at = ?, status = 'closed' "
+        "WHERE id = ? AND status = 'active';",
+        -1, &statement, nullptr) == SQLITE_OK;
+    if (succeeded)
+    {
+        sqlite3_bind_int64(statement, 1, startedAt);
+        sqlite3_bind_int64(statement, 2, activeId);
+        succeeded = sqlite3_step(statement) == SQLITE_DONE &&
+            sqlite3_changes(db) == 1;
+    }
+    sqlite3_finalize(statement);
+
+    if (succeeded)
+    {
+        statement = nullptr;
+        succeeded = sqlite3_prepare_v2(
+            db,
+            "INSERT INTO billing_cycles "
+            "(started_at, ended_at, tariff_json, status, created_at) "
+            "VALUES(?, 0, ?, 'active', ?);",
+            -1, &statement, nullptr) == SQLITE_OK;
+        if (succeeded)
+        {
+            sqlite3_bind_int64(statement, 1, startedAt);
+            sqlite3_bind_text(statement, 2, activeTariff.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(statement, 3, startedAt);
+            succeeded = sqlite3_step(statement) == SQLITE_DONE;
+        }
+        sqlite3_finalize(statement);
+    }
+
+    if (succeeded)
+        succeeded = execute("COMMIT;");
+    if (!succeeded)
+    {
+        std::cerr << "Start billing cycle failed: " << sqlite3_errmsg(db) << '\n';
+        execute("ROLLBACK;");
+    }
+    return succeeded;
+}
+
+std::vector<BillingCycleRecord> Database::loadBillingCycles() const
+{
+    std::vector<BillingCycleRecord> cycles;
+    sqlite3_stmt *statement = nullptr;
+    const char *sql = R"(
+        SELECT id, started_at, ended_at, tariff_json, status, created_at
+        FROM billing_cycles
+        ORDER BY started_at DESC, id DESC;
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, nullptr) != SQLITE_OK)
+    {
+        std::cerr << "Load billing cycles failed: " << sqlite3_errmsg(db) << '\n';
+        return cycles;
+    }
+
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        auto text = [statement](int column)
+        {
+            const unsigned char *value = sqlite3_column_text(statement, column);
+            return value == nullptr
+                ? std::string()
+                : std::string(reinterpret_cast<const char *>(value));
+        };
+        cycles.push_back({
+            sqlite3_column_int64(statement, 0),
+            sqlite3_column_int64(statement, 1),
+            sqlite3_column_int64(statement, 2),
+            text(3),
+            text(4),
+            sqlite3_column_int64(statement, 5)});
+    }
+    sqlite3_finalize(statement);
+    return cycles;
+}

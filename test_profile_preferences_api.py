@@ -361,6 +361,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             self.assertIn("PATCH", response.headers["Access-Control-Allow-Methods"])
 
     def test_energy_assistant_uses_rule_based_fallback_without_provider(self):
+        _, status = self.request("GET", "/api/assistant/status")
+        self.assertEqual(status["provider"], "OpenAI")
+        self.assertFalse(status["configured"])
+        self.assertEqual(status["model"], "gpt-4.1-mini")
+
         _, result = self.request(
             "POST",
             "/api/assistant/chat",
@@ -373,6 +378,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.assertIn("last24Hours", result["windows"])
         self.assertIn("last7Days", result["windows"])
         self.assertIn("last30Days", result["windows"])
+        self.assertIn("billingPeriod", result)
         self.assertIn(
             "previousEnergyKwh",
             result["windows"]["last7Days"],
@@ -395,6 +401,94 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "/api/assistant/chat",
             {"question": "x" * 5000},
             expected=413,
+        )
+
+    def test_billing_period_save_keeps_device_and_energy_history(self):
+        _, initial = self.request("GET", "/api/billing")
+        current = initial["current"]
+        self.assertEqual(current["status"], "active")
+
+        tariff = {
+            "slab1": 3.0,
+            "slab2": 4.0,
+            "slab3": 5.0,
+            "slab4": 6.0,
+            "wheeling": 0.2,
+            "fixedCharge": 10.0,
+            "dutyPercent": 5.0,
+        }
+        self.request("PUT", "/api/billing/tariff", tariff)
+        _, before_unconfirmed = self.request("GET", "/api/billing")
+        self.assertEqual(before_unconfirmed["current"]["tariff"], tariff)
+        self.request(
+            "POST", "/api/billing/cycles", {"confirmed": False}, expected=400
+        )
+
+        database_path = self.database_dir / "smarthome.db"
+        database = sqlite3.connect(database_path)
+        original_devices = database.execute(
+            "SELECT id, status, setting FROM devices ORDER BY id"
+        ).fetchall()
+        original_energy_count = database.execute(
+            "SELECT COUNT(*) FROM energy_sessions"
+        ).fetchone()[0]
+        database.close()
+
+        time.sleep(1.1)
+        _, started = self.request(
+            "POST",
+            "/api/billing/cycles",
+            {"confirmed": True, "expectedCycleId": current["id"]},
+            expected=201,
+        )
+        _, after = self.request("GET", "/api/billing")
+        self.assertEqual(after["current"]["startedAt"], started["startedAt"])
+        self.assertEqual(len(after["history"]), len(before_unconfirmed["history"]) + 1)
+        saved = after["history"][0]
+        self.assertEqual(saved["id"], current["id"])
+        self.assertEqual(saved["endedAt"], started["startedAt"])
+        self.request(
+            "POST",
+            "/api/billing/cycles",
+            {"confirmed": True, "expectedCycleId": current["id"]},
+            expected=409,
+        )
+
+        units = saved["consumptionKwh"]
+        energy_charge = (
+            min(units, 100) * tariff["slab1"]
+            + min(max(units - 100, 0), 200) * tariff["slab2"]
+            + min(max(units - 300, 0), 200) * tariff["slab3"]
+            + max(units - 500, 0) * tariff["slab4"]
+        )
+        total = energy_charge + units * tariff["wheeling"] + tariff["fixedCharge"]
+        total += (energy_charge + units * tariff["wheeling"]) * tariff["dutyPercent"] / 100
+        self.assertAlmostEqual(saved["bill"]["total"], total, places=7)
+
+        database = sqlite3.connect(database_path)
+        self.assertEqual(
+            database.execute("SELECT COUNT(*) FROM energy_sessions").fetchone()[0],
+            original_energy_count,
+        )
+        self.assertEqual(
+            database.execute("SELECT id, status, setting FROM devices ORDER BY id").fetchall(),
+            original_devices,
+        )
+        self.assertEqual(
+            database.execute("SELECT COUNT(*) FROM billing_cycles WHERE status='active'").fetchone()[0],
+            1,
+        )
+        database.close()
+
+        self.stop_server()
+        self.start_server()
+        _, after_restart = self.request("GET", "/api/billing")
+        self.assertEqual(after_restart["current"]["id"], after["current"]["id"])
+        self.assertEqual(after_restart["history"][0]["id"], saved["id"])
+        self.assertAlmostEqual(
+            after_restart["history"][0]["bill"]["total"],
+            saved["bill"]["total"],
+            places=7,
         )
 
     def test_device_capabilities_settings_migration_and_restart(self):

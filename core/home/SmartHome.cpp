@@ -911,6 +911,40 @@ std::vector<EnergySessionRecord> SmartHome::getEnergySessions() const
     return energyTracker.loadSessions();
 }
 
+std::string SmartHome::getBillingTariff() const
+{
+    std::lock_guard<std::mutex> lock(billingMutex);
+    return database.loadBillingTariff();
+}
+
+bool SmartHome::saveBillingTariff(const std::string &tariffJson)
+{
+    std::lock_guard<std::mutex> lock(billingMutex);
+    return database.saveBillingTariff(tariffJson);
+}
+
+bool SmartHome::ensureBillingCycle(
+    long long startedAt,
+    const std::string &tariffJson)
+{
+    std::lock_guard<std::mutex> lock(billingMutex);
+    return database.ensureBillingCycle(startedAt, tariffJson);
+}
+
+bool SmartHome::startBillingCycle(
+    long long startedAt,
+    long long expectedActiveCycleId)
+{
+    std::lock_guard<std::mutex> lock(billingMutex);
+    return database.startBillingCycle(startedAt, expectedActiveCycleId);
+}
+
+std::vector<BillingCycleRecord> SmartHome::getBillingCycles() const
+{
+    std::lock_guard<std::mutex> lock(billingMutex);
+    return database.loadBillingCycles();
+}
+
 void SmartHome::handleExpiredDevice(
     const std::string &deviceId)
 {

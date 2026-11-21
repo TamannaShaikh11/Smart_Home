@@ -180,6 +180,10 @@ function App() {
   const deviceRefreshVersion = useRef(0);
 
   const [tariff, setTariff] = useState(DEFAULT_TARIFF);
+  const [billing, setBilling] = useState(null);
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingError, setBillingError] = useState("");
+  const [assistantStatus, setAssistantStatus] = useState(null);
 
   const [tariffInputs, setTariffInputs] = useState({
     ...DEFAULT_TARIFF,
@@ -1721,25 +1725,52 @@ function App() {
     }
   }, [fetchJson]);
 
+  const loadBilling = useCallback(async () => {
+    try {
+      const data = await fetchJson(`${API_URL}/billing`);
+      setBilling(data);
+      setTariff(data.tariff ?? DEFAULT_TARIFF);
+      if (!showTariffSettings)
+        setTariffInputs(data.tariff ?? DEFAULT_TARIFF);
+      setBillingError("");
+    } catch (err) {
+      setBillingError(`Unable to load saved electricity periods. ${err.message}`);
+    }
+  }, [fetchJson, showTariffSettings]);
+
+  useEffect(() => {
+    let active = true;
+    fetchJson(`${API_URL}/assistant/status`)
+      .then((status) => {
+        if (active) setAssistantStatus(status);
+      })
+      .catch(() => {
+        if (active) setAssistantStatus(null);
+      });
+    return () => { active = false; };
+  }, [fetchJson]);
+
   useEffect(() => {
     const initialLoad = setTimeout(() => {
       loadDashboard(true);
       loadEnergySessions();
       loadEnergySummary();
       loadProfiles();
+      loadBilling();
     }, 0);
 
     const interval = setInterval(() => {
       loadDashboard(false);
       loadEnergySessions();
       loadEnergySummary();
+      loadBilling();
     }, 10000);
 
     return () => {
       clearTimeout(initialLoad);
       clearInterval(interval);
     };
-  }, [loadDashboard, loadEnergySessions, loadEnergySummary, loadProfiles]);
+  }, [loadDashboard, loadEnergySessions, loadEnergySummary, loadProfiles, loadBilling]);
 
   useEffect(() => {
     const interval = setInterval(
@@ -1833,8 +1864,8 @@ function App() {
   ).length;
 
   const bill = useMemo(
-    () => calculateBill(totalEnergyKwh, tariff),
-    [totalEnergyKwh, tariff]
+    () => billing?.current?.bill ?? calculateBill(0, tariff),
+    [billing, tariff]
   );
 
   const filteredDevices = useMemo(() => {
@@ -2179,7 +2210,7 @@ function App() {
     }));
   };
 
-  const saveTariffSettings = (event) => {
+  const saveTariffSettings = async (event) => {
     event.preventDefault();
 
     const nextTariff = {};
@@ -2195,15 +2226,52 @@ function App() {
       nextTariff[key] = value;
     }
 
-    setTariff(nextTariff);
-    setTariffInputs({ ...nextTariff });
-    setShowTariffSettings(false);
-    setError("");
+    setBillingBusy(true);
+    try {
+      await fetchJson(`${API_URL}/billing/tariff`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextTariff),
+      });
+      setTariff(nextTariff);
+      setTariffInputs({ ...nextTariff });
+      setShowTariffSettings(false);
+      setError("");
+      await loadBilling();
+    } catch (err) {
+      setBillingError(`Could not save tariff settings. ${err.message}`);
+    } finally {
+      setBillingBusy(false);
+    }
   };
 
   const resetTariff = () => {
-    setTariff(DEFAULT_TARIFF);
     setTariffInputs({ ...DEFAULT_TARIFF });
+  };
+
+  const startNewBillingCycle = async () => {
+    if (billingBusy || !billing?.current) return;
+    if (!window.confirm(
+      "Save the estimated electricity and cost for this period, then start a new period now? Device states and energy session history will stay unchanged."
+    )) return;
+
+    setBillingBusy(true);
+    try {
+      await fetchJson(`${API_URL}/billing/cycles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          confirmed: true,
+          expectedCycleId: billing.current.id,
+        }),
+      });
+      await Promise.all([loadBilling(), loadEnergySessions(), loadEnergySummary()]);
+      setBillingError("");
+    } catch (err) {
+      setBillingError(`Could not save this electricity period. ${err.message}`);
+    } finally {
+      setBillingBusy(false);
+    }
   };
 
 
@@ -3157,11 +3225,18 @@ function App() {
 
         {activeSection === "assistant" && <section id="assistant" className="content-section">
           <div className="section-heading"><div><p className="eyebrow">DATA-GROUNDED GUIDANCE</p><h2>Energy assistant</h2><p className="section-subtitle">Ask about energy history. Answers use backend-calculated session estimates and never control devices.</p></div></div>
+          <div className="panel assistant-notice" role="status">{assistantStatus
+            ? assistantStatus.configured
+              ? `OpenAI is configured (${assistantStatus.model}). Answers use saved SmartHomeOS energy and current-period data.`
+              : "OpenAI is ready to configure. Add your API key to AI_API_KEY in the ignored .env file at the project root, then restart the C++ API. The local energy summary works until then."
+            : "AI provider status is unavailable. Check that the C++ API is running."}</div>
           {assistantError && <div className="alert alert-error" role="alert"><div><p>{assistantError}</p><button className="secondary-button" type="button" onClick={() => askAssistant(assistantQuestion)} disabled={assistantBusy || !assistantQuestion.trim()}>Retry question</button></div><button type="button" onClick={() => setAssistantError("")} aria-label="Dismiss assistant error">×</button></div>}
           <div className="assistant-suggestions" aria-label="Suggested questions">
             {[
               "How much energy was estimated this week?",
               "Which appliance used the most energy in the last 24 hours?",
+              "How much has my current electricity period cost so far?",
+              "Explain how the electricity estimate is calculated.",
               "What could I review to reduce energy use?",
             ].map((question) => (
               <button className="secondary-button" key={question} type="button" disabled={assistantBusy} onClick={() => setAssistantQuestion(question)}>{question}</button>
@@ -3178,6 +3253,11 @@ function App() {
                     {message.notice && <p className="assistant-notice" role="status">{message.notice}</p>}
                     <p>{message.answer}</p>
                     <div className="assistant-metrics">
+                      {message.billingPeriod && <div className="panel assistant-metric">
+                        <span>Current period · estimated</span>
+                        <strong>{Number(message.billingPeriod.consumptionKwh).toFixed(5)} kWh · ₹{Number(message.billingPeriod.bill.total).toFixed(2)}</strong>
+                        <small>Since {formatDate(message.billingPeriod.startedAt)} · software estimate, not a meter reading</small>
+                      </div>}
                       {[
                         ["last24Hours", "24 hours"],
                         ["last7Days", "7 days"],
@@ -3277,10 +3357,13 @@ function App() {
         </section>}
 
         {activeSection === "billing" && <section id="billing" className="content-section">
-          <div className="section-heading"><div><p className="eyebrow">COST PLANNING</p><h2>Electricity bill estimator</h2><p className="section-subtitle">An editable, illustrative slab-based estimate — not an official utility bill.</p></div><button className="secondary-button" onClick={() => setShowTariffSettings((v) => !v)}>{showTariffSettings ? "Hide tariff settings" : "⚙ Edit tariff"}</button></div>
-          {showTariffSettings && <form className="panel tariff-form" onSubmit={saveTariffSettings}><div className="form-grid">{[["slab1", "First 100 units (₹/unit)"], ["slab2", "101–300 units (₹/unit)"], ["slab3", "301–500 units (₹/unit)"], ["slab4", "Above 500 units (₹/unit)"], ["wheeling", "Wheeling charge (₹/unit)"], ["fixedCharge", "Fixed charge (₹/period)"], ["dutyPercent", "Electricity duty (%)"]].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" step="0.01" value={tariffInputs[key]} onChange={(e) => handleTariffInput(key, e.target.value)} required /></label>)}</div><div className="form-actions"><button type="button" className="secondary-button" onClick={resetTariff}>Reset defaults</button><button className="primary-button">Apply rates</button></div><p className="fine-print">Tariff values are held in React state and reset on page reload. Verify the assumptions for your consumer category.</p></form>}
-          <div className="billing-layout"><div className="bill-total-card"><p>ESTIMATED TOTAL</p><strong>₹{bill.total.toFixed(2)}</strong><span>Based on {bill.units.toFixed(4)} recorded units</span><div className="bill-total-foot"><span>Energy charges</span><strong>₹{bill.energyCharge.toFixed(2)}</strong></div></div><div className="panel bill-breakdown"><h3>Charge breakdown</h3>{[["First 100 units", bill.first * tariff.slab1], ["101–300 units", bill.second * tariff.slab2], ["301–500 units", bill.third * tariff.slab3], ["Above 500 units", bill.fourth * tariff.slab4], ["Wheeling charges", bill.wheelingCharge], ["Fixed charge", bill.fixedCharge], ["Electricity duty", bill.duty]].map(([label, value]) => <div className="bill-row" key={label}><span>{label}</span><strong>₹{Number(value).toFixed(2)}</strong></div>)}<div className="bill-row bill-row-total"><span>Estimated total</span><strong>₹{bill.total.toFixed(2)}</strong></div></div></div>
-          <p className="fine-print">The default slab rates, fixed charge and duty are assumptions for demonstration. This estimate does not apply a calendar billing-period filter and may omit charges or adjustments on an actual bill.</p>
+          {billingError && <div className="alert alert-error" role="alert">{billingError}</div>}
+          <div className="section-heading"><div><p className="eyebrow">COST PLANNING</p><h2>Electricity cost by period</h2><p className="section-subtitle">Save a day or any time period; the next period starts immediately when you save.</p></div><div className="form-actions"><button className="secondary-button" type="button" onClick={() => setShowTariffSettings((visible) => !visible)}>{showTariffSettings ? "Hide tariff settings" : "⚙ Edit tariff"}</button><button className="primary-button" type="button" onClick={startNewBillingCycle} disabled={billingBusy || !billing?.current}>{billingBusy ? "Saving period…" : "Save current period & start next"}</button></div></div>
+          {showTariffSettings && <form className="panel tariff-form" onSubmit={saveTariffSettings}><div className="form-grid">{[["slab1", "First 100 units (₹/unit)"], ["slab2", "101–300 units (₹/unit)"], ["slab3", "301–500 units (₹/unit)"], ["slab4", "Above 500 units (₹/unit)"], ["wheeling", "Wheeling charge (₹/unit)"], ["fixedCharge", "Fixed charge (₹/period)"], ["dutyPercent", "Electricity duty (%)"]].map(([key, label]) => <label key={key}>{label}<input type="number" min="0" step="0.01" value={tariffInputs[key]} onChange={(e) => handleTariffInput(key, e.target.value)} required /></label>)}</div><div className="form-actions"><button type="button" className="secondary-button" onClick={resetTariff}>Reset defaults</button><button className="primary-button" disabled={billingBusy}>{billingBusy ? "Saving rates…" : "Apply rates"}</button></div><p className="fine-print">Tariff values are saved by the backend and retained after restarts. They are illustrative assumptions; verify your utility's actual rates.</p></form>}
+          {billing?.current && <div className="panel billing-cycle-meta"><h3>Current period</h3><p>{formatDate(billing.current.startedAt)} <span aria-hidden="true">→</span> Now</p><p>{Number(billing.current.consumptionKwh).toFixed(5)} kWh · estimated cost ₹{Number(billing.current.bill.total).toFixed(2)}</p></div>}
+          <div className="billing-layout"><div className="bill-total-card"><p>ESTIMATED TOTAL · CURRENT PERIOD</p><strong>₹{bill.total.toFixed(2)}</strong><span>Based on {Number(billing?.current?.consumptionKwh ?? 0).toFixed(5)} estimated kWh</span><div className="bill-total-foot"><span>Energy charges</span><strong>₹{bill.energyCharge.toFixed(2)}</strong></div></div><div className="panel bill-breakdown"><h3>Charge breakdown</h3>{[["First 100 units", bill.first * tariff.slab1], ["101–300 units", bill.second * tariff.slab2], ["301–500 units", bill.third * tariff.slab3], ["Above 500 units", bill.fourth * tariff.slab4], ["Wheeling charges", bill.wheelingCharge], ["Fixed charge", bill.fixedCharge], ["Electricity duty", bill.duty]].map(([label, value]) => <div className="bill-row" key={label}><span>{label}</span><strong>₹{Number(value).toFixed(2)}</strong></div>)}<div className="bill-row bill-row-total"><span>Estimated total</span><strong>₹{bill.total.toFixed(2)}</strong></div></div></div>
+          <p className="fine-print">Energy is estimated from rated appliance power and recorded ON-session time, not a physical meter. Each saved period applies the configured illustrative tariff independently; this is not an official utility bill.</p>
+          <section className="panel billing-history"><h3>Saved electricity periods</h3>{!billing?.history?.length ? <p>No saved periods yet. Use the button above at the end of a day or period to save its estimate.</p> : <div className="table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Estimated use</th><th>Estimated cost</th></tr></thead><tbody>{billing.history.map((period) => <tr key={period.id}><td>{formatDate(period.startedAt)}</td><td>{formatDate(period.endedAt)}</td><td>{Number(period.consumptionKwh).toFixed(5)} kWh</td><td>₹{Number(period.bill.total).toFixed(2)}</td></tr>)}</tbody></table></div>}</section>
         </section>}
 
         {activeSection === "history" && <section id="history" className="content-section">

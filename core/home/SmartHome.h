@@ -17,6 +17,7 @@ private:
     std::vector<Room> rooms;
 
     mutable std::mutex homeMutex;
+    mutable std::mutex billingMutex;
 
     // Database is declared before DeviceManager so that
     // DeviceManager is destroyed first.
@@ -82,6 +83,11 @@ public:
     std::vector<std::string> getRoomNames() const;
     std::vector<DeviceRecord> getAllDeviceRecords() const;
     std::vector<EnergySessionRecord> getEnergySessions() const;
+    std::string getBillingTariff() const;
+    bool saveBillingTariff(const std::string &tariffJson);
+    bool ensureBillingCycle(long long startedAt, const std::string &tariffJson);
+    bool startBillingCycle(long long startedAt, long long expectedActiveCycleId);
+    std::vector<BillingCycleRecord> getBillingCycles() const;
 
     // Persistent user profiles and room preferences.
     bool createUserProfile(const UserProfile &profile);

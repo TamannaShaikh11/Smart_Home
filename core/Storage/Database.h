@@ -95,6 +95,16 @@ struct ModeHistoryRecord
     long long restoredAt = 0;
 };
 
+struct BillingCycleRecord
+{
+    long long id = 0;
+    long long startedAt = 0;
+    long long endedAt = 0;
+    std::string tariffJson;
+    std::string status;
+    long long createdAt = 0;
+};
+
 class Database
 {
 private:
@@ -158,6 +168,12 @@ public:
         long long id,
         const std::string &restoreDetailsJson,
         long long restoredAt);
+
+    std::string loadBillingTariff() const;
+    bool saveBillingTariff(const std::string &tariffJson);
+    bool ensureBillingCycle(long long startedAt, const std::string &tariffJson);
+    bool startBillingCycle(long long startedAt, long long expectedActiveCycleId);
+    std::vector<BillingCycleRecord> loadBillingCycles() const;
 
     bool renameRoom(
         const std::string &oldName,

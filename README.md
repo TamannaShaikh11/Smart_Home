@@ -507,8 +507,13 @@ pattern. It will not overwrite an existing backup; startup stops if backup
 creation fails.
 
 Energy values are estimates calculated from rated watts and recorded ON
-duration; they are not sensor measurements. The bill estimator uses editable,
-demonstration tariff assumptions held in frontend state.
+duration; they are not sensor measurements. Electricity periods are saved in
+SQLite. `GET /api/billing` returns the active period and saved history,
+`PUT /api/billing/tariff` saves tariff assumptions, and confirmed
+`POST /api/billing/cycles` saves the current estimate and starts the next
+period at the same timestamp. Energy sessions and device states are preserved.
+Period costs are estimates using the configured tariff independently for each
+saved period; this is not an official monthly utility calculation.
 
 The energy monitor reports trailing 24-hour, 7-day, and 30-day estimates,
 previous-window comparisons, and room/appliance breakdowns. The estimates
@@ -517,21 +522,17 @@ come from a physical meter.
 
 ### Energy assistant configuration
 
-The assistant always works without credentials by returning a deterministic
-summary and an advisory review suggestion based on backend-calculated energy
-data. Optional cloud explanations are sent only by the C++ backend using
-Windows WinHTTP. Configure an HTTPS endpoint that accepts the OpenAI-compatible
-Chat Completions request/response shape and set these process environment
-variables before starting the backend:
+The electricity assistant sends bounded energy windows, the active saved
+period estimate, recent saved-period estimates, and the configured tariff to
+OpenAI through Windows WinHTTP. It never sends appliance-control commands.
+Without an API key, it uses the local rule-based summary. Provider responses
+are validated and unsupported numeric claims fall back to the local summary.
 
-* `AI_API_KEY` — provider key; never add a real value to source control.
-* `AI_API_URL` — full HTTPS chat-completions endpoint.
-* `AI_MODEL` — provider model identifier.
-
-See [.env.example](./.env.example) for placeholders. The application does not
-read `.env` files automatically. The integration was tested in no-key fallback
-mode; a real provider request requires the user's provider configuration and
-has not been tested here.
+Copy `.env.example` to `.env` or edit the ignored `.env` file at the project
+root. Add your key to `AI_API_KEY`; the default endpoint and model are already
+set to OpenAI Chat Completions and `gpt-4.1-mini`. The backend reads `.env`
+when it starts; process environment variables take precedence. Restart the C++
+API after adding the key. Never put the key in React code or commit `.env`.
 
 ### Room-scoped manual control and camera automation
 
@@ -647,7 +648,8 @@ per-room camera opt-in and per-preference automatic-application confirmation
 fields; existing records default to disabled/unconfirmed. Before each
 migration, the backend creates an online backup named
 `smarthome.db.pre-v<version>-<timestamp>-<number>.bak`; it stops if the backup
-fails.
+fails. Migration version 5 adds persistent tariff and electricity-period tables
+with a unique active-period index; previous energy-session history is preserved.
 The local service supports OpenCV Haar detection and LBPH matching, not secure
 authentication or liveness detection. Real camera capture and matching
 accuracy depend on the user's local camera, lighting, and enrollment; neither

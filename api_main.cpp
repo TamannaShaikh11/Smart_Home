@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <algorithm>
 #include <exception>
@@ -891,6 +892,50 @@ namespace
         return value == nullptr ? std::string() : std::string(value);
     }
 
+    void loadLocalEnvironmentFile()
+    {
+        std::ifstream input(".env");
+        if (!input)
+            return;
+
+        const std::set<std::string> allowed{
+            "AI_API_KEY", "AI_API_URL", "AI_MODEL"};
+        std::string line;
+        while (std::getline(input, line))
+        {
+            const std::size_t first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos || line[first] == '#')
+                continue;
+            const std::size_t separator = line.find('=', first);
+            if (separator == std::string::npos)
+                continue;
+
+            const std::string name = line.substr(first, separator - first);
+            if (allowed.count(name) == 0 || !environmentValue(name.c_str()).empty())
+                continue;
+
+            const std::size_t valueStart =
+                line.find_first_not_of(" \t", separator + 1);
+            if (valueStart == std::string::npos)
+                continue;
+            std::string value = line.substr(valueStart);
+            const std::size_t valueEnd = value.find_last_not_of(" \t\r");
+            if (valueEnd != std::string::npos)
+                value.resize(valueEnd + 1);
+            if (value.size() >= 2 &&
+                ((value.front() == '"' && value.back() == '"') ||
+                 (value.front() == '\'' && value.back() == '\'')))
+                value = value.substr(1, value.size() - 2);
+            if (value.empty())
+                continue;
+#ifdef _WIN32
+            _putenv_s(name.c_str(), value.c_str());
+#else
+            setenv(name.c_str(), value.c_str(), 0);
+#endif
+        }
+    }
+
     std::string formatKwh(double value)
     {
         std::ostringstream formatted;
@@ -1020,6 +1065,184 @@ namespace
             {"energyKwh", totalKwh},
             {"byRoom", roomBreakdown},
             {"byAppliance", deviceBreakdown}};
+    }
+
+    json defaultBillingTariff()
+    {
+        return {{"slab1", 3.96}, {"slab2", 10.8}, {"slab3", 15.03},
+                {"slab4", 17.53}, {"wheeling", 1.6},
+                {"fixedCharge", 100.0}, {"dutyPercent", 16.0}};
+    }
+
+    bool validBillingTariff(const json &tariff)
+    {
+        static const std::vector<std::string> keys = {
+            "slab1", "slab2", "slab3", "slab4", "wheeling",
+            "fixedCharge", "dutyPercent"};
+        if (!tariff.is_object() || tariff.size() != keys.size())
+            return false;
+        for (const std::string &key : keys)
+        {
+            if (!tariff.contains(key) || !tariff[key].is_number())
+                return false;
+            const double value = tariff[key].get<double>();
+            if (!std::isfinite(value) || value < 0.0 || value > 1000000.0)
+                return false;
+        }
+        return true;
+    }
+
+    json calculateTariffBill(double units, const json &tariff)
+    {
+        const double first = std::min(units, 100.0);
+        const double second = std::min(std::max(units - 100.0, 0.0), 200.0);
+        const double third = std::min(std::max(units - 300.0, 0.0), 200.0);
+        const double fourth = std::max(units - 500.0, 0.0);
+        const double energyCharge = first * tariff["slab1"].get<double>() +
+            second * tariff["slab2"].get<double>() +
+            third * tariff["slab3"].get<double>() +
+            fourth * tariff["slab4"].get<double>();
+        const double wheeling = units * tariff["wheeling"].get<double>();
+        const double fixed = tariff["fixedCharge"].get<double>();
+        const double duty = (energyCharge + wheeling) *
+            tariff["dutyPercent"].get<double>() / 100.0;
+        return { {"units", units}, {"first", first}, {"second", second},
+                 {"third", third}, {"fourth", fourth},
+                 {"energyCharge", energyCharge}, {"wheelingCharge", wheeling},
+                 {"fixedCharge", fixed}, {"duty", duty},
+                 {"total", energyCharge + wheeling + fixed + duty} };
+    }
+
+    json ensureBillingTariff(SmartHome &home)
+    {
+        const std::string savedTariff = home.getBillingTariff();
+        if (!savedTariff.empty())
+        {
+            try
+            {
+                const json parsed = json::parse(savedTariff);
+                if (validBillingTariff(parsed))
+                    return parsed;
+            }
+            catch (const json::exception &)
+            {
+            }
+        }
+
+        const json fallback = defaultBillingTariff();
+        if (!home.saveBillingTariff(fallback.dump()))
+            throw std::runtime_error("Could not initialize billing tariff.");
+        return fallback;
+    }
+
+    json makeBillingOverview(SmartHome &home, long long now)
+    {
+        const json tariff = ensureBillingTariff(home);
+        if (!home.ensureBillingCycle(now, tariff.dump()))
+            throw std::runtime_error("Could not initialize a billing period.");
+
+        const auto sessions = home.getEnergySessions();
+        const auto cycles = home.getBillingCycles();
+        json current = nullptr;
+        json history = json::array();
+        for (const BillingCycleRecord &cycle : cycles)
+        {
+            json cycleTariff = tariff;
+            try
+            {
+                const json parsed = json::parse(cycle.tariffJson);
+                if (validBillingTariff(parsed))
+                    cycleTariff = parsed;
+            }
+            catch (const json::exception &)
+            {
+            }
+
+            const long long endAt = cycle.status == "active" ? now : cycle.endedAt;
+            const json usage = summarizeEnergyWindow(
+                sessions, cycle.startedAt, endAt);
+            json item = {
+                {"id", cycle.id},
+                {"startedAt", cycle.startedAt},
+                {"endedAt", cycle.endedAt},
+                {"status", cycle.status},
+                {"tariff", cycleTariff},
+                {"consumptionKwh", usage["energyKwh"]},
+                {"bill", calculateTariffBill(
+                    usage["energyKwh"].get<double>(), cycleTariff)}};
+            if (cycle.status == "active")
+                current = item;
+            else
+                history.push_back(item);
+        }
+
+        if (current.is_null())
+            throw std::runtime_error("No active billing period is available.");
+        return {{"current", current}, {"history", history},
+                {"tariff", tariff}, {"estimated", true}, {"unit", "kWh"}};
+    }
+
+    void collectContextNumbers(const json &value, std::set<double> &numbers)
+    {
+        if (value.is_number())
+        {
+            numbers.insert(value.get<double>());
+        }
+        else if (value.is_array())
+        {
+            for (const json &item : value)
+                collectContextNumbers(item, numbers);
+        }
+        else if (value.is_object())
+        {
+            for (auto item = value.begin(); item != value.end(); ++item)
+                collectContextNumbers(item.value(), numbers);
+        }
+    }
+
+    bool containsOnlyGroundedNumbers(const std::string &answer, const json &context)
+    {
+        std::set<double> supported;
+        collectContextNumbers(context, supported);
+        for (std::size_t index = 0; index < answer.size();)
+        {
+            if (!std::isdigit(static_cast<unsigned char>(answer[index])) &&
+                !(answer[index] == '-' && index + 1 < answer.size() &&
+                  std::isdigit(static_cast<unsigned char>(answer[index + 1]))))
+            {
+                ++index;
+                continue;
+            }
+
+            const std::size_t start = index;
+            if (answer[index] == '-')
+                ++index;
+            while (index < answer.size() &&
+                   (std::isdigit(static_cast<unsigned char>(answer[index])) ||
+                    answer[index] == '.' || answer[index] == ','))
+                ++index;
+
+            std::string token = answer.substr(start, index - start);
+            token.erase(std::remove(token.begin(), token.end(), ','), token.end());
+            try
+            {
+                std::size_t parsedLength = 0;
+                const double number = std::stod(token, &parsedLength);
+                if (parsedLength != token.size())
+                    return false;
+                const bool grounded = std::any_of(
+                    supported.begin(), supported.end(),
+                    [number](double candidate)
+                    { return std::abs(candidate - number) < 1e-9; });
+                if (!grounded)
+                    return false;
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool validPreferences(const UserPreferenceRecord &preferences)
@@ -1221,8 +1444,14 @@ namespace
     {
 #ifdef _WIN32
         const std::string apiKey = environmentValue("AI_API_KEY");
-        const std::string apiUrl = environmentValue("AI_API_URL");
-        const std::string model = environmentValue("AI_MODEL");
+        const std::string configuredUrl = environmentValue("AI_API_URL");
+        const std::string configuredModel = environmentValue("AI_MODEL");
+        const std::string apiUrl = configuredUrl.empty()
+            ? "https://api.openai.com/v1/chat/completions"
+            : configuredUrl;
+        const std::string model = configuredModel.empty()
+            ? "gpt-4.1-mini"
+            : configuredModel;
         if (apiKey.empty() || apiUrl.empty() || model.empty())
         {
             return false;
@@ -1299,13 +1528,16 @@ namespace
                 {
                     {"role", "system"},
                     {"content",
-                     "Explain the supplied SmartHomeOS energy context concisely. "
-                     "It is estimated from rated power and recorded ON-session "
-                     "durations, not measured by a meter. Use no numeric values, "
-                     "percentages, costs, device-state claims, or unsupported "
-                     "savings estimates. Give advisory suggestions only; never "
-                     "claim to control an appliance. The UI displays authoritative "
-                     "figures separately."}
+                     "You are the SmartHomeOS electricity assistant. Explain "
+                     "the supplied current-period bill, tariff, and energy context "
+                     "concisely. Energy and cost values are software estimates from "
+                     "rated watts and recorded ON-session durations, not meter "
+                     "readings or utility invoices. Use numeric values only when "
+                     "the exact value appears in the supplied context; the server "
+                     "rejects unsupported numeric claims. Do not invent savings, "
+                     "tariffs, meter readings, or device states. If the data is "
+                     "insufficient, say what is missing. Provide advice only and "
+                     "never claim to control an appliance."}
                 },
                 {
                     {"role", "user"},
@@ -1382,8 +1614,7 @@ namespace
             answer = parsed["choices"][0]["message"]["content"]
                          .get<std::string>();
             if (answer.empty() || answer.size() > 4000 ||
-                std::any_of(answer.begin(), answer.end(), [](unsigned char c)
-                { return std::isdigit(c) != 0; }))
+                !containsOnlyGroundedNumbers(answer, context))
             {
                 answer.clear();
                 return false;
@@ -1407,6 +1638,7 @@ int main()
 {
     try
     {
+        loadLocalEnvironmentFile();
         // One SmartHome instance owns the live devices and database.
         SmartHome home("My Smart Home");
 
@@ -2402,6 +2634,132 @@ int main()
                        }
                    });
 
+        server.Get("/api/billing",
+                   [&home](const httplib::Request &, httplib::Response &res)
+                   {
+                       try
+                       {
+                           const long long now =
+                               static_cast<long long>(std::time(nullptr));
+                           res.set_content(
+                               makeBillingOverview(home, now).dump(),
+                               "application/json");
+                       }
+                       catch (const std::exception &error)
+                       {
+                           res.status = 500;
+                           res.set_content(json({{"error", error.what()}}).dump(), "application/json");
+                       }
+                   });
+
+        server.Put("/api/billing/tariff",
+                   [&home](const httplib::Request &req, httplib::Response &res)
+                   {
+                       try
+                       {
+                           const json tariff = json::parse(req.body);
+                           if (!validBillingTariff(tariff))
+                           {
+                               res.status = 400;
+                               res.set_content(R"({"error":"Provide all seven non-negative tariff values."})", "application/json");
+                               return;
+                           }
+                           if (!home.saveBillingTariff(tariff.dump()))
+                           {
+                               res.status = 500;
+                               res.set_content(R"({"error":"Could not save tariff settings."})", "application/json");
+                               return;
+                           }
+                           res.set_content(json({{"tariff", tariff}}).dump(), "application/json");
+                       }
+                       catch (const json::exception &error)
+                       {
+                           res.status = 400;
+                           res.set_content(json({{"error", error.what()}}).dump(), "application/json");
+                       }
+                   });
+
+        server.Post("/api/billing/cycles",
+                    [&home](const httplib::Request &req, httplib::Response &res)
+                    {
+                        try
+                        {
+                            const json body = json::parse(req.body);
+                            if (!body.is_object() || !body.contains("confirmed") ||
+                                !body["confirmed"].is_boolean() || !body["confirmed"].get<bool>())
+                            {
+                                res.status = 400;
+                                res.set_content(R"({"error":"Explicit confirmation is required to save this period and start the next."})", "application/json");
+                                return;
+                            }
+                            if (!body.contains("expectedCycleId") ||
+                                !body["expectedCycleId"].is_number_integer() ||
+                                body["expectedCycleId"].get<long long>() <= 0)
+                            {
+                                res.status = 400;
+                                res.set_content(R"({"error":"expectedCycleId must identify the period being saved."})", "application/json");
+                                return;
+                            }
+
+                            const long long now =
+                                static_cast<long long>(std::time(nullptr));
+                            const json tariff = ensureBillingTariff(home);
+                            if (!home.ensureBillingCycle(now, tariff.dump()))
+                                throw std::runtime_error("Could not ensure the active billing period.");
+                            const auto cycles = home.getBillingCycles();
+                            const auto active = std::find_if(
+                                cycles.begin(), cycles.end(),
+                                [](const BillingCycleRecord &cycle)
+                                { return cycle.status == "active"; });
+                            if (active == cycles.end())
+                                throw std::runtime_error("No active billing period is available.");
+                            const long long expectedCycleId =
+                                body["expectedCycleId"].get<long long>();
+                            if (active->id != expectedCycleId)
+                            {
+                                res.status = 409;
+                                res.set_content(R"({"error":"The billing period changed. Refresh and try again."})", "application/json");
+                                return;
+                            }
+                            if (now <= active->startedAt)
+                            {
+                                res.status = 409;
+                                res.set_content(R"({"error":"This period just started. Wait a moment before saving it."})", "application/json");
+                                return;
+                            }
+                            if (!home.startBillingCycle(now, expectedCycleId))
+                            {
+                                res.status = 409;
+                                res.set_content(R"({"error":"The period could not be closed safely. Refresh billing and try again."})", "application/json");
+                                return;
+                            }
+                            res.status = 201;
+                            res.set_content(json({{"started", true}, {"startedAt", now}}).dump(), "application/json");
+                        }
+                        catch (const json::exception &error)
+                        {
+                            res.status = 400;
+                            res.set_content(json({{"error", error.what()}}).dump(), "application/json");
+                        }
+                        catch (const std::exception &error)
+                        {
+                            res.status = 500;
+                            res.set_content(json({{"error", error.what()}}).dump(), "application/json");
+                        }
+                    });
+
+        server.Get("/api/assistant/status",
+                   [](const httplib::Request &, httplib::Response &res)
+                   {
+                       const std::string configuredModel = environmentValue("AI_MODEL");
+                       res.set_content(json({
+                           {"provider", "OpenAI"},
+                           {"configured", !environmentValue("AI_API_KEY").empty()},
+                           {"model", configuredModel.empty()
+                               ? "gpt-4.1-mini" : configuredModel}}).dump(),
+                           "application/json");
+                   });
+
         // Ask an optional cloud model to explain bounded, calculated energy context.
         server.Post("/api/assistant/chat",
                     [&home](const httplib::Request &req, httplib::Response &res)
@@ -2491,6 +2849,32 @@ int main()
                                 {"topApplianceLast24Hours", nullptr},
                                 {"topRoomLast24Hours", nullptr}};
 
+                            const json billing = makeBillingOverview(home, now);
+                            const json &currentPeriod = billing["current"];
+                            context["currentBillingPeriod"] = {
+                                {"estimated", true},
+                                {"consumptionKwh", currentPeriod["consumptionKwh"]},
+                                {"estimatedCost", currentPeriod["bill"]["total"]}};
+                            context["tariffPerKwh"] = {
+                                {"first100Units", billing["tariff"]["slab1"]},
+                                {"units101To300", billing["tariff"]["slab2"]},
+                                {"units301To500", billing["tariff"]["slab3"]},
+                                {"unitsAbove500", billing["tariff"]["slab4"]},
+                                {"wheeling", billing["tariff"]["wheeling"]},
+                                {"fixedCharge", billing["tariff"]["fixedCharge"]},
+                                {"dutyPercent", billing["tariff"]["dutyPercent"]}};
+                            context["recentSavedPeriods"] = json::array();
+                            for (std::size_t index = 0;
+                                 index < billing["history"].size() && index < 5;
+                                 ++index)
+                            {
+                                const json &period = billing["history"][index];
+                                context["recentSavedPeriods"].push_back({
+                                    {"estimated", true},
+                                    {"consumptionKwh", period["consumptionKwh"]},
+                                    {"estimatedCost", period["bill"]["total"]}});
+                            }
+
                             auto addLargest = [&context](
                                                   const json &items,
                                                   const char *key)
@@ -2516,9 +2900,7 @@ int main()
 
                             std::string answer;
                             const bool cloudConfigured =
-                                !environmentValue("AI_API_KEY").empty() &&
-                                !environmentValue("AI_API_URL").empty() &&
-                                !environmentValue("AI_MODEL").empty();
+                                !environmentValue("AI_API_KEY").empty();
                             const bool usedCloud =
                                 requestAiExplanation(question, context, answer);
                             if (!usedCloud)
@@ -2564,6 +2946,15 @@ int main()
                                               " kWh compared with the previous "
                                               "seven-day window.";
                                 }
+                                const json &currentPeriod =
+                                    billing["current"];
+                                answer += " The current saved period has an "
+                                          "estimated " +
+                                          formatKwh(currentPeriod["consumptionKwh"]
+                                                        .get<double>()) +
+                                          " kWh and an estimated cost of ₹" +
+                                          currentPeriod["bill"]["total"].dump() +
+                                          ".";
                             }
 
                             json recommendations = json::array();
@@ -2603,9 +2994,10 @@ int main()
                                     {"estimated", true},
                                     {"unit", "kWh"},
                                     {"windows", windows},
+                                    {"billingPeriod", billing["current"]},
                                     {"limitations", json::array({
                                         "Energy is estimated from rated watts and recorded ON-session durations, not meter readings.",
-                                        "Tariff settings are held in the frontend and are not available to this assistant; it cannot calculate a bill.",
+                                        "Tariff slab charges are estimated using the rate saved for this period; this calculation does not reproduce an official monthly utility bill.",
                                         "Saved profile preferences are not included in assistant context."})},
                                     {"recommendations", recommendations}})
                                     .dump(),

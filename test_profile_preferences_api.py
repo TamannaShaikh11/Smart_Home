@@ -42,6 +42,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             cls.baseline_schema_version = destination.execute(
                 "PRAGMA user_version"
             ).fetchone()[0]
+            cls.baseline_enrollment_ids = {
+                row[0] for row in destination.execute(
+                    "SELECT id FROM automation_enrollments"
+                )
+            }
             cls.baseline_device_count = destination.execute(
                 "SELECT COUNT(*) FROM devices"
             ).fetchone()[0]
@@ -408,7 +413,7 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         self.assertTrue({
             "light_type", "brightness", "color", "color_temperature"
         }.issubset(columns))
-        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(database.execute("PRAGMA user_version").fetchone()[0], 5)
         automation_tables = {
             row[0] for row in database.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -422,6 +427,11 @@ class ProfilePreferencesApiTest(unittest.TestCase):
             "mode_presets",
             "mode_history",
         }.issubset(automation_tables))
+        self.assertTrue({"billing_settings", "billing_cycles"}.issubset(
+            {row[0] for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+        ))
         database.close()
         self.assertEqual(original_device_count, self.baseline_device_count)
 
@@ -1210,7 +1220,10 @@ class ProfilePreferencesApiTest(unittest.TestCase):
         _, enrollments_before = self.request(
             "GET", "/api/automation/enrollments"
         )
-        self.assertEqual(enrollments_before, [])
+        self.assertEqual(
+            {item["id"] for item in enrollments_before},
+            self.baseline_enrollment_ids,
+        )
         self.request(
             "POST",
             "/api/automation/enrollments",

@@ -132,7 +132,7 @@ bool Database::initializeSchema()
             ? sqlite3_column_int(versionStatement, 0)
             : -1;
     sqlite3_finalize(versionStatement);
-    if (schemaVersion < 0 || schemaVersion > 4)
+    if (schemaVersion < 0 || schemaVersion > 5)
     {
         std::cerr << "Unsupported database schema version: "
                   << schemaVersion << '\n';
@@ -410,6 +410,53 @@ bool Database::initializeSchema()
             )");
         if (migrationSucceeded)
             migrationSucceeded = execute("PRAGMA user_version = 4;");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("COMMIT;");
+        else
+            execute("ROLLBACK;");
+    }
+
+    if (schemaVersion < 5)
+    {
+        if (!createMigrationBackup(db, filename, 5))
+            return false;
+        if (!execute("BEGIN IMMEDIATE;"))
+            return false;
+
+        migrationSucceeded = execute(R"(
+            CREATE TABLE IF NOT EXISTS billing_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                tariff_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(R"(
+                CREATE TABLE IF NOT EXISTS billing_cycles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at INTEGER NOT NULL,
+                    ended_at INTEGER NOT NULL DEFAULT 0,
+                    tariff_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('active', 'closed')),
+                    created_at INTEGER NOT NULL
+                );
+            )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(
+                "CREATE INDEX IF NOT EXISTS idx_billing_cycles_started "
+                "ON billing_cycles(started_at DESC);");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(R"(
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_one_active_cycle
+                ON billing_cycles(status) WHERE status = 'active';
+            )");
+        if (migrationSucceeded)
+            migrationSucceeded = execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_automation_one_enrollment_per_profile "
+                "ON automation_enrollments(profile_id);");
+        if (migrationSucceeded)
+            migrationSucceeded = execute("PRAGMA user_version = 5;");
         if (migrationSucceeded)
             migrationSucceeded = execute("COMMIT;");
         else
